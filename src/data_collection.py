@@ -384,7 +384,7 @@ class URLFeatureExtractor:
         failed = result['url_length'].isna().sum()
         logger.info(
             f"Extraction terminée — {total - failed}/{total} URLs traitées avec succès "
-            f"({failed} échecs → NaN)."
+            f"({failed} échecs -> NaN)."
         )
         return result
 
@@ -1056,3 +1056,431 @@ class LegitimateURLCollector:
         logger.info(f"TERMINÉ : {len(df_legit):,} URLs légitimes")
         logger.info("=" * 60)
         return df_legit
+
+
+# ===========================================================================
+# Fusion, Nettoyage & Construction du Dataset Final
+# ===========================================================================
+
+"""
+Classe DatasetBuilder : orchestre la fusion des URLs phishing + légitimes,
+l'extraction des 15 features (11 simples + 4 enrichies), le nettoyage,
+la validation des contraintes et l'export en Parquet + CSV.
+
+Pipeline complet :
+    phishing_urls  (JSON ou CSV)  ─┐
+                                    ├─→  Fusion  →  Extraction features
+    legitimate_urls (CSV)         ─┘       →  Nettoyage  →  Validation
+                                                   →  Export (parquet + csv)
+
+Utilisation rapide :
+    from src.data_collection import DatasetBuilder
+
+    builder = DatasetBuilder()
+    df = builder.build(
+        phishing_path   = 'data/raw/phishtank_raw.json',
+        legitimate_path = 'data/raw/legitimate_urls.csv',
+    )
+    # → data/dataset.parquet  +  data/sample.csv
+"""
+
+
+class DatasetBuilder:
+    """Construit le dataset final ML à partir des URLs phishing et légitimes.
+
+    Étapes internes :
+        1. Chargement des URLs phishing (JSON PhishTank ou CSV)
+        2. Chargement des URLs légitimes (CSV)
+        3. Fusion + déduplication
+        4. Extraction des 11 features URL simples (URLFeatureExtractor)
+        5. Extraction des 4 features enrichies WHOIS/SSL/GeoIP/Brand (optionnel)
+        6. Nettoyage : suppression NaN et doublons résiduels
+        7. Validation des 4 contraintes projet
+        8. Export dataset.parquet + sample.csv
+
+    Attributes:
+        enrich (bool): Si True, calcule les 4 features WHOIS/SSL/GeoIP/Brand.
+                       Désactiver pour un run rapide (test/dev).
+        enrich_delay (float): Délai entre appels API enrichies (secondes).
+
+    Example:
+        >>> builder = DatasetBuilder(enrich=False)   # rapide, 11 features
+        >>> df = builder.build(
+        ...     phishing_path='data/raw/phishtank_raw.json',
+        ...     legitimate_path='data/raw/legitimate_urls.csv',
+        ... )
+        >>> df.shape
+        (10500, 13)   # url + is_phishing + 11 features
+    """
+
+    # Contraintes projet imposées
+    MIN_ROWS        = 10_000
+    MIN_PHISHING_PC = 5.0
+    MAX_PHISHING_PC = 25.0
+    MIN_FEATURES    = 8
+
+    def __init__(self, enrich: bool = False, enrich_delay: float = 0.3):
+        """Initialise le builder.
+
+        Args:
+            enrich (bool): Activer les features enrichies WHOIS/SSL/GeoIP/Brand.
+                           False par défaut car chaque URL nécessite ~3-5 s de
+                           requêtes réseau (WHOIS + URLScan + SSL).
+            enrich_delay (float): Pause en secondes entre deux URLs pour les
+                                  features enrichies (respecte les rate limits).
+        """
+        self.enrich       = enrich
+        self.enrich_delay = enrich_delay
+
+    # -----------------------------------------------------------------------
+    # Étape 1 : Chargement des URLs phishing
+    # -----------------------------------------------------------------------
+
+    def _load_phishing(self, path: str) -> pd.DataFrame:
+        """Charge les URLs de phishing depuis un fichier JSON (PhishTank) ou CSV.
+
+        Gère deux formats :
+        - JSON PhishTank : liste de dicts avec clé 'url'
+        - CSV simple : colonne 'url' ou première colonne
+
+        Args:
+            path (str): Chemin vers le fichier de données phishing.
+
+        Returns:
+            pd.DataFrame: DataFrame avec colonnes ['url', 'is_phishing'].
+
+        Raises:
+            FileNotFoundError: Si le fichier n'existe pas.
+            ValueError: Si aucune colonne URL n'est trouvée.
+        """
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Fichier phishing introuvable : {path}\n"
+                "Lancez d'abord PhishTankCollector().fetch_raw_data() pour le générer."
+            )
+
+        logger.info(f"Chargement phishing : {path}")
+
+        if p.suffix == '.json':
+            raw = json.loads(p.read_text(encoding='utf-8'))
+            # PhishTank : liste de dicts → extraire le champ 'url'
+            if isinstance(raw, list):
+                urls = [entry.get('url') or entry.get('phish_url') for entry in raw]
+                urls = [u for u in urls if u]
+            else:
+                raise ValueError("Format JSON phishing non reconnu (attendu : liste de dicts).")
+            df = pd.DataFrame({'url': urls})
+
+        elif p.suffix == '.csv':
+            df = pd.read_csv(path, encoding='utf-8')
+            # Cherche une colonne 'url' ou prend la première colonne
+            if 'url' not in df.columns:
+                df = df.rename(columns={df.columns[0]: 'url'})
+
+        else:
+            raise ValueError(f"Format non supporté : {p.suffix}. Utilisez .json ou .csv.")
+
+        df['url']         = df['url'].astype(str).str.strip()
+        df['is_phishing'] = 1
+
+        logger.info(f"  {len(df):,} URLs phishing chargées")
+        return df[['url', 'is_phishing']]
+
+    # -----------------------------------------------------------------------
+    # Étape 2 : Chargement des URLs légitimes
+    # -----------------------------------------------------------------------
+
+    def _load_legitimate(self, path: str) -> pd.DataFrame:
+        """Charge les URLs légitimes depuis le CSV généré par LegitimateURLCollector.
+
+        Args:
+            path (str): Chemin vers le fichier CSV légitime.
+
+        Returns:
+            pd.DataFrame: DataFrame avec colonnes ['url', 'is_phishing'].
+
+        Raises:
+            FileNotFoundError: Si le fichier n'existe pas.
+        """
+        if not Path(path).exists():
+            raise FileNotFoundError(
+                f"Fichier légitimes introuvable : {path}\n"
+                "Lancez d'abord LegitimateURLCollector().collect() pour le générer."
+            )
+
+        logger.info(f"Chargement légitimes : {path}")
+        df = pd.read_csv(path, encoding='utf-8')
+        df['url']         = df['url'].astype(str).str.strip()
+        df['is_phishing'] = 0
+
+        logger.info(f"  {len(df):,} URLs légitimes chargées")
+        return df[['url', 'is_phishing']]
+
+    # -----------------------------------------------------------------------
+    # Étape 3 : Fusion + déduplication initiale
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_urls(df_phishing: pd.DataFrame, df_legit: pd.DataFrame) -> pd.DataFrame:
+        """Fusionne et déduplique les deux DataFrames.
+
+        Args:
+            df_phishing (pd.DataFrame): URLs phishing (is_phishing=1).
+            df_legit (pd.DataFrame): URLs légitimes (is_phishing=0).
+
+        Returns:
+            pd.DataFrame: DataFrame fusionné et dédupliqué.
+        """
+        df = pd.concat([df_phishing, df_legit], ignore_index=True)
+        before = len(df)
+        df = df.drop_duplicates(subset=['url'])
+        df = df.dropna(subset=['url'])
+        df = df[df['url'].str.startswith('http')]   # garde seulement les URLs valides
+        after = len(df)
+
+        logger.info(f"Fusion : {before:,} lignes -> {after:,} après dédup/nettoyage")
+        logger.info(
+            f"  Phishing : {df['is_phishing'].sum():,} "
+            f"| Légitimes : {(df['is_phishing'] == 0).sum():,}"
+        )
+        return df.reset_index(drop=True)
+
+    # -----------------------------------------------------------------------
+    # Étape 4 : Extraction des features simples (11 features, sans réseau)
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_simple_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Extrait les 11 features URL simples via URLFeatureExtractor.
+
+        Args:
+            df (pd.DataFrame): DataFrame avec colonne 'url'.
+
+        Returns:
+            pd.DataFrame: DataFrame original + 11 colonnes de features.
+        """
+        logger.info(f"Extraction des 11 features simples pour {len(df):,} URLs...")
+        result = URLFeatureExtractor.extract_from_dataframe(df, url_column='url')
+        logger.info("  11 features simples extraites.")
+        return result
+
+    # -----------------------------------------------------------------------
+    # Étape 5 : Extraction des features enrichies (4 features, avec réseau)
+    # -----------------------------------------------------------------------
+
+    def _extract_enriched_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Extrait les 4 features enrichies via EnrichedFeatureExtractor.
+
+        Attention : lent (~3-5 s par URL). Désactivez avec enrich=False
+        pour les tests ou les runs de développement.
+
+        Args:
+            df (pd.DataFrame): DataFrame avec colonne 'url'.
+
+        Returns:
+            pd.DataFrame: DataFrame original + 4 colonnes enrichies.
+        """
+        logger.info(
+            f"Extraction des 4 features enrichies pour {len(df):,} URLs...\n"
+            f"  Estimation : ~{len(df) * 4 // 60} min (réseau requis)"
+        )
+        extractor = EnrichedFeatureExtractor()
+        result = extractor.extract_from_dataframe(
+            df,
+            url_column='url',
+            delay_between_requests=self.enrich_delay,
+        )
+        logger.info("  4 features enrichies extraites.")
+        return result
+
+    # -----------------------------------------------------------------------
+    # Étape 6 : Nettoyage (NaN + doublons)
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _clean(df: pd.DataFrame) -> pd.DataFrame:
+        """Supprime les lignes avec NaN et les doublons résiduels.
+
+        Args:
+            df (pd.DataFrame): DataFrame après extraction des features.
+
+        Returns:
+            pd.DataFrame: DataFrame propre.
+        """
+        before = len(df)
+        df = df.dropna()
+        df = df.drop_duplicates(subset=['url'])
+        after = len(df)
+        logger.info(f"Nettoyage : {before:,} -> {after:,} lignes ({before - after:,} supprimées)")
+        return df.reset_index(drop=True)
+
+    # -----------------------------------------------------------------------
+    # Étape 7 : Validation des contraintes projet
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _validate(df: pd.DataFrame) -> None:
+        """Vérifie les 4 contraintes qualité imposées par le projet.
+
+        Contraintes :
+            1. >= 10 000 lignes
+            2. % phishing entre 5 % et 25 %
+            3. >= 8 features (colonnes hors 'url' et 'is_phishing')
+            4. Aucun doublon d'URL
+
+        Args:
+            df (pd.DataFrame): Dataset final à valider.
+
+        Raises:
+            AssertionError: Si une contrainte n'est pas respectée.
+        """
+        logger.info("=" * 50)
+        logger.info("VERIFICATION DES CONTRAINTES")
+        logger.info("=" * 50)
+
+        n_rows    = len(df)
+        pc_phish  = (df['is_phishing'].sum() / n_rows) * 100
+        n_feat    = len(df.columns) - 2   # -2 pour 'url' et 'is_phishing'
+        n_dupes   = df.duplicated(subset=['url']).sum()
+
+        logger.info(f"  Lignes              : {n_rows:,}   (min {DatasetBuilder.MIN_ROWS:,})")
+        logger.info(f"  % Phishing          : {pc_phish:.2f}%  (attendu 5-25%)")
+        logger.info(f"  Nombre de features  : {n_feat}    (min {DatasetBuilder.MIN_FEATURES})")
+        logger.info(f"  Doublons URL        : {n_dupes}")
+
+        assert n_rows >= DatasetBuilder.MIN_ROWS, (
+            f"ECHEC : {n_rows:,} lignes < {DatasetBuilder.MIN_ROWS:,} requises.\n"
+            "Solution : collectez plus d'URLs légitimes ou phishing."
+        )
+        assert DatasetBuilder.MIN_PHISHING_PC <= pc_phish <= DatasetBuilder.MAX_PHISHING_PC, (
+            f"ECHEC : % phishing = {pc_phish:.2f}% hors de [5%, 25%].\n"
+            "Solution : ajustez le ratio phishing/légitimes."
+        )
+        assert n_feat >= DatasetBuilder.MIN_FEATURES, (
+            f"ECHEC : {n_feat} features < {DatasetBuilder.MIN_FEATURES} requises."
+        )
+        assert n_dupes == 0, f"ECHEC : {n_dupes} doublons détectés."
+
+        logger.info("  TOUTES LES CONTRAINTES RESPECTEES")
+        logger.info("=" * 50)
+
+    # -----------------------------------------------------------------------
+    # Étape 8 : Export Parquet + CSV
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _export(
+        df: pd.DataFrame,
+        parquet_path: str = 'data/dataset.parquet',
+        csv_path: str     = 'data/sample.csv',
+        sample_size: int  = 100,
+    ) -> None:
+        """Exporte le dataset en deux formats.
+
+        - dataset.parquet : dataset complet (format compressé optimal pour ML)
+        - sample.csv      : échantillon de `sample_size` lignes pour vérification rapide
+
+        Args:
+            df (pd.DataFrame): Dataset final.
+            parquet_path (str): Chemin du fichier Parquet.
+            csv_path (str): Chemin du fichier CSV d'échantillon.
+            sample_size (int): Nombre de lignes dans l'échantillon CSV.
+        """
+        Path(parquet_path).parent.mkdir(parents=True, exist_ok=True)
+
+        # Export Parquet (format compressé, rapide à lire en ML)
+        df.to_parquet(parquet_path, compression='gzip', index=False)
+        parquet_kb = Path(parquet_path).stat().st_size / 1024
+        logger.info(f"Parquet : {parquet_path} ({parquet_kb:.1f} KB, {len(df):,} lignes)")
+
+        # Export CSV échantillon
+        df.head(sample_size).to_csv(csv_path, index=False, encoding='utf-8')
+        csv_kb = Path(csv_path).stat().st_size / 1024
+        logger.info(f"CSV     : {csv_path} ({csv_kb:.1f} KB, {sample_size} lignes)")
+
+        # Statistiques finales
+        logger.info("=" * 50)
+        logger.info("STATISTIQUES DU DATASET FINAL")
+        logger.info("=" * 50)
+        logger.info(f"  Lignes totales   : {len(df):,}")
+        logger.info(f"  Phishing         : {df['is_phishing'].sum():,}")
+        logger.info(f"  Légitimes        : {(df['is_phishing'] == 0).sum():,}")
+        pc = (df['is_phishing'].sum() / len(df)) * 100
+        logger.info(f"  % Phishing       : {pc:.2f}%")
+        logger.info(f"  Features         : {len(df.columns) - 2}")
+        logger.info(f"  Colonnes         : {list(df.columns)}")
+        logger.info("=" * 50)
+
+    # -----------------------------------------------------------------------
+    # Méthode principale : build
+    # -----------------------------------------------------------------------
+
+    def build(
+        self,
+        phishing_path: str   = 'data/raw/phishtank_raw.json',
+        legitimate_path: str = 'data/raw/legitimate_urls.csv',
+        parquet_path: str    = 'data/dataset.parquet',
+        csv_path: str        = 'data/sample.csv',
+        sample_size: int     = 100,
+    ) -> pd.DataFrame:
+        """Orchestre la construction complète du dataset ML.
+
+        Enchaîne les 8 étapes : chargement → fusion → features → nettoyage
+        → validation → export.
+
+        Args:
+            phishing_path (str): Fichier JSON PhishTank ou CSV phishing.
+            legitimate_path (str): Fichier CSV généré par LegitimateURLCollector.
+            parquet_path (str): Destination du dataset complet (.parquet).
+            csv_path (str): Destination de l'échantillon de 100 lignes (.csv).
+            sample_size (int): Taille de l'échantillon CSV (défaut : 100).
+
+        Returns:
+            pd.DataFrame: Dataset final propre, validé, avec toutes les features.
+
+        Raises:
+            FileNotFoundError: Si un fichier source est introuvable.
+            AssertionError: Si une contrainte projet n'est pas respectée.
+
+        Example:
+            >>> builder = DatasetBuilder(enrich=False)
+            >>> df = builder.build(
+            ...     phishing_path='data/raw/phishtank_raw.json',
+            ...     legitimate_path='data/raw/legitimate_urls.csv',
+            ... )
+            >>> df.shape
+            (10500, 13)
+            >>> list(df.columns)
+            ['url', 'is_phishing', 'url_length', 'domain_length', ...]
+        """
+        logger.info("=" * 60)
+        logger.info("CONSTRUCTION DU DATASET FINAL")
+        logger.info(f"  enrich={self.enrich} | features={'15' if self.enrich else '11'}")
+        logger.info("=" * 60)
+
+        # 1. Charger les URLs
+        df_phishing = self._load_phishing(phishing_path)
+        df_legit    = self._load_legitimate(legitimate_path)
+
+        # 2. Fusionner
+        df = self._merge_urls(df_phishing, df_legit)
+
+        # 3. Extraire les 11 features simples (toujours)
+        df = self._extract_simple_features(df)
+
+        # 4. Extraire les 4 features enrichies (optionnel, lent)
+        if self.enrich:
+            df = self._extract_enriched_features(df)
+
+        # 5. Nettoyer
+        df = self._clean(df)
+
+        # 6. Valider les contraintes
+        self._validate(df)
+
+        # 7. Exporter
+        self._export(df, parquet_path, csv_path, sample_size)
+
+        logger.info("COMPLETE — dataset pret pour le modele ML")
+        return df
