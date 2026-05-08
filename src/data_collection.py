@@ -385,3 +385,480 @@ class URLFeatureExtractor:
             f"({failed} échecs → NaN)."
         )
         return result
+
+
+# ===========================================================================
+# E2-02 : Extraction des Features WHOIS/DNS Enrichies
+# ===========================================================================
+"""
+Classe EnrichedFeatureExtractor : extrait les 4 features enrichies nécessitant
+des appels API externes (WHOIS, URLScan.io, SSL, difflib).
+
+Features extraites :
+    12. domain_age_days    — Âge du domaine en jours (via WHOIS)
+    13. country            — Pays du serveur (via URLScan.io)
+    14. has_valid_ssl      — Certificat SSL valide ? 1/0 (socket/ssl)
+    15. brand_similarity   — Similarité max avec marques connues (difflib)
+
+Utilisation :
+    from src.data_collection import EnrichedFeatureExtractor
+
+    extractor = EnrichedFeatureExtractor()
+    features = extractor.extract_enriched_features("https://example.com")
+    # → {'domain_age_days': 9500, 'country': 'US', 'has_valid_ssl': 1, 'brand_similarity': 0.36}
+
+    # Ou sur un DataFrame complet :
+    df_enriched = extractor.extract_from_dataframe(df, url_column='url')
+"""
+
+import ssl
+import socket
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from urllib.parse import urlparse
+
+import whois as whois_lib
+
+
+class EnrichedFeatureExtractor:
+    """Extrait les 4 features enrichies d'une URL via APIs externes.
+
+    Gère : WHOIS (âge domaine), URLScan.io (pays), SSL (certificat),
+    difflib (similarité marque). Toutes les méthodes incluent une gestion
+    complète des erreurs (timeout, domaine invalide, API indisponible).
+
+    Attributes:
+        urlscan_api_key (str | None): Clé API URLScan.io (optionnelle).
+        timeout (int): Timeout réseau en secondes pour SSL et URLScan.
+        known_brands (list[str]): Liste de marques connues pour brand_similarity.
+
+    Example:
+        >>> extractor = EnrichedFeatureExtractor()
+        >>> features = extractor.extract_enriched_features("https://amazon.com")
+        >>> features['brand_similarity']
+        1.0
+    """
+
+    # Marques connues ciblées par le phishing (liste extensible)
+    KNOWN_BRANDS = [
+        'amazon', 'google', 'facebook', 'paypal', 'ebay',
+        'apple', 'microsoft', 'netflix', 'instagram', 'twitter',
+        'linkedin', 'dropbox', 'github', 'yahoo', 'outlook',
+        'chase', 'wellsfargo', 'bankofamerica', 'citibank', 'hsbc',
+    ]
+
+    # Valeurs de repli utilisées quand une feature ne peut pas être calculée
+    _FALLBACK_VALUES = {
+        'domain_age_days': -1,
+        'country': 'UNKNOWN',
+        'has_valid_ssl': 0,
+        'brand_similarity': 0.0,
+    }
+
+    def __init__(
+        self,
+        urlscan_api_key: Optional[str] = None,
+        timeout: int = 10,
+    ):
+        """Initialise l'extracteur.
+
+        Args:
+            urlscan_api_key (str, optional): Clé API URLScan.io.
+                Si None, essaie de lire URLSCAN_API_KEY depuis l'environnement.
+            timeout (int): Timeout réseau en secondes (défaut : 10).
+        """
+        load_dotenv()
+        self.urlscan_api_key = urlscan_api_key or os.getenv('URLSCAN_API_KEY')
+        self.timeout = timeout
+        self._whois_cache: dict = {}  # Cache WHOIS pour éviter les doublons
+
+        if not self.urlscan_api_key:
+            logger.warning(
+                "URLSCAN_API_KEY absente — la feature 'country' retournera 'UNKNOWN' "
+                "pour les domaines absents de l'index public URLScan."
+            )
+
+    # -----------------------------------------------------------------------
+    # Feature 12 : domain_age_days  (WHOIS)
+    # -----------------------------------------------------------------------
+
+    def get_domain_age_days(self, domain: str) -> int:
+        """Retourne l'âge du domaine en jours via WHOIS.
+
+        Gère :
+        - Les dates de création sous forme de liste (whois peut retourner plusieurs dates)
+        - Les domaines inexistants ou sans info WHOIS
+        - Les timeouts et erreurs réseau
+        - Le cache interne pour éviter des appels répétés
+
+        Args:
+            domain (str): Nom de domaine pur (ex: "example.com").
+
+        Returns:
+            int: Nombre de jours depuis la création du domaine,
+                 ou -1 si l'info n'est pas disponible.
+
+        Example:
+            >>> extractor.get_domain_age_days("google.com")
+            9908  # valeur approximative
+        """
+        if not domain or not isinstance(domain, str):
+            logger.warning("get_domain_age_days : domaine vide ou invalide.")
+            return self._FALLBACK_VALUES['domain_age_days']
+
+        # Cache hit → évite un nouvel appel réseau
+        if domain in self._whois_cache:
+            logger.debug(f"WHOIS cache hit pour : {domain}")
+            return self._whois_cache[domain]
+
+        try:
+            logger.debug(f"WHOIS lookup pour : {domain}")
+            w = whois_lib.whois(domain)
+
+            creation_date = w.creation_date
+
+            # whois peut retourner une liste de dates ; on prend la plus ancienne
+            if isinstance(creation_date, list):
+                creation_date = min(
+                    [d for d in creation_date if isinstance(d, datetime)],
+                    default=None
+                )
+
+            if creation_date is None:
+                logger.warning(f"WHOIS : pas de date de création pour '{domain}'.")
+                self._whois_cache[domain] = self._FALLBACK_VALUES['domain_age_days']
+                return self._FALLBACK_VALUES['domain_age_days']
+
+            # Harmonisation timezone-naive / timezone-aware
+            now = datetime.now(timezone.utc)
+            if creation_date.tzinfo is None:
+                creation_date = creation_date.replace(tzinfo=timezone.utc)
+
+            age_days = (now - creation_date).days
+            if age_days < 0:
+                logger.warning(f"WHOIS : date de création dans le futur pour '{domain}' — valeur ignorée.")
+                age_days = self._FALLBACK_VALUES['domain_age_days']
+
+            self._whois_cache[domain] = age_days
+            logger.info(f"WHOIS OK — '{domain}' : {age_days} jours")
+            return age_days
+
+        except Exception as exc:
+            logger.warning(f"WHOIS erreur pour '{domain}' : {exc}")
+            self._whois_cache[domain] = self._FALLBACK_VALUES['domain_age_days']
+            return self._FALLBACK_VALUES['domain_age_days']
+
+    # -----------------------------------------------------------------------
+    # Feature 13 : country  (URLScan.io)
+    # -----------------------------------------------------------------------
+
+    def get_country(self, domain: str) -> str:
+        """Retourne le pays du serveur via l'API URLScan.io.
+
+        Effectue une requête GET sur le endpoint de recherche URLScan.io
+        et parse le code pays ISO-3166 depuis le dernier scan connu.
+
+        Args:
+            domain (str): Nom de domaine pur (ex: "example.com").
+
+        Returns:
+            str: Code pays ISO à 2 lettres (ex: "US", "FR"),
+                 ou "UNKNOWN" si l'info n'est pas disponible.
+
+        Example:
+            >>> extractor.get_country("google.com")
+            'US'
+        """
+        if not domain or not isinstance(domain, str):
+            logger.warning("get_country : domaine vide ou invalide.")
+            return self._FALLBACK_VALUES['country']
+
+        try:
+            headers = {'Content-Type': 'application/json'}
+            if self.urlscan_api_key:
+                headers['API-Key'] = self.urlscan_api_key
+
+            api_url = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size=1"
+            logger.debug(f"URLScan.io GET : {api_url}")
+
+            response = requests.get(
+                api_url,
+                headers=headers,
+                timeout=self.timeout
+            )
+
+            if response.status_code == 429:
+                logger.warning("URLScan.io : rate limit atteint — 'country' = UNKNOWN.")
+                return self._FALLBACK_VALUES['country']
+
+            if response.status_code == 401:
+                logger.warning("URLScan.io : clé API invalide ou absente.")
+                return self._FALLBACK_VALUES['country']
+
+            response.raise_for_status()
+            data = response.json()
+
+            results = data.get('results', [])
+            if not results:
+                logger.info(f"URLScan.io : aucun résultat pour '{domain}'.")
+                return self._FALLBACK_VALUES['country']
+
+            # Cherche le pays dans page > country ou task > country
+            first = results[0]
+            country = (
+                first.get('page', {}).get('country')
+                or first.get('task', {}).get('country')
+                or first.get('stats', {}).get('ipStats', [{}])[0].get('geoip', {}).get('country_code')
+            )
+
+            if country and isinstance(country, str) and len(country) <= 3:
+                logger.info(f"URLScan.io OK — '{domain}' : pays = {country}")
+                return country.upper()
+
+            logger.info(f"URLScan.io : pays non trouvé pour '{domain}'.")
+            return self._FALLBACK_VALUES['country']
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"URLScan.io : timeout pour '{domain}'.")
+            return self._FALLBACK_VALUES['country']
+        except requests.exceptions.ConnectionError as exc:
+            logger.warning(f"URLScan.io : erreur connexion pour '{domain}' : {exc}")
+            return self._FALLBACK_VALUES['country']
+        except (requests.exceptions.RequestException, ValueError, KeyError) as exc:
+            logger.warning(f"URLScan.io : erreur pour '{domain}' : {exc}")
+            return self._FALLBACK_VALUES['country']
+
+    # -----------------------------------------------------------------------
+    # Feature 14 : has_valid_ssl  (socket + ssl)
+    # -----------------------------------------------------------------------
+
+    def check_ssl_validity(self, domain: str) -> int:
+        """Vérifie si le domaine possède un certificat SSL valide.
+
+        Tente une connexion TLS sur le port 443 avec le contexte par défaut
+        (vérification de la chaîne de certificats et du hostname).
+
+        Args:
+            domain (str): Nom de domaine pur (ex: "example.com").
+
+        Returns:
+            int: 1 si le certificat est valide, 0 sinon.
+
+        Example:
+            >>> extractor.check_ssl_validity("google.com")
+            1
+            >>> extractor.check_ssl_validity("expired.badssl.com")
+            0
+        """
+        if not domain or not isinstance(domain, str):
+            logger.warning("check_ssl_validity : domaine vide ou invalide.")
+            return self._FALLBACK_VALUES['has_valid_ssl']
+
+        try:
+            context = ssl.create_default_context()
+            logger.debug(f"SSL check pour : {domain}")
+
+            with socket.create_connection((domain, 443), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                    cert = ssock.getpeercert()
+
+                    # Vérification supplémentaire : le cert doit être non-vide
+                    if cert:
+                        logger.info(f"SSL OK — '{domain}' : certificat valide.")
+                        return 1
+                    else:
+                        logger.warning(f"SSL : certificat vide pour '{domain}'.")
+                        return 0
+
+        except ssl.SSLCertVerificationError as exc:
+            logger.warning(f"SSL : certificat invalide pour '{domain}' : {exc}")
+            return 0
+        except ssl.SSLError as exc:
+            logger.warning(f"SSL : erreur SSL pour '{domain}' : {exc}")
+            return 0
+        except socket.timeout:
+            logger.warning(f"SSL : timeout pour '{domain}'.")
+            return 0
+        except socket.gaierror as exc:
+            logger.warning(f"SSL : résolution DNS échouée pour '{domain}' : {exc}")
+            return 0
+        except ConnectionRefusedError:
+            logger.warning(f"SSL : connexion refusée sur le port 443 pour '{domain}'.")
+            return 0
+        except OSError as exc:
+            logger.warning(f"SSL : erreur réseau pour '{domain}' : {exc}")
+            return 0
+
+    # -----------------------------------------------------------------------
+    # Feature 15 : brand_similarity  (difflib)
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def calculate_brand_similarity(domain: str, brands: Optional[list] = None) -> float:
+        """Calcule la similarité maximale entre le nom de domaine et les marques connues.
+
+        Utilise SequenceMatcher (difflib) pour comparer le nom de domaine
+        (partie avant le premier point) avec chaque marque de la liste.
+
+        Args:
+            domain (str): Nom de domaine pur (ex: "amaz0n.com").
+            brands (list, optional): Liste de marques à comparer.
+                Si None, utilise EnrichedFeatureExtractor.KNOWN_BRANDS.
+
+        Returns:
+            float: Score de similarité maximal entre 0.0 et 1.0
+                   (1.0 = identique, 0.0 = aucune ressemblance).
+
+        Example:
+            >>> EnrichedFeatureExtractor.calculate_brand_similarity("amazon.com")
+            1.0
+            >>> EnrichedFeatureExtractor.calculate_brand_similarity("amaz0n.com")
+            0.923...
+        """
+        if not domain or not isinstance(domain, str):
+            logger.warning("calculate_brand_similarity : domaine vide ou invalide.")
+            return EnrichedFeatureExtractor._FALLBACK_VALUES['brand_similarity']
+
+        if brands is None:
+            brands = EnrichedFeatureExtractor.KNOWN_BRANDS
+
+        try:
+            # Extrait uniquement le nom avant le premier point
+            domain_name = domain.split('.')[0].lower().strip()
+
+            if not domain_name:
+                return EnrichedFeatureExtractor._FALLBACK_VALUES['brand_similarity']
+
+            max_similarity = 0.0
+            for brand in brands:
+                similarity = SequenceMatcher(None, domain_name, brand).ratio()
+                if similarity > max_similarity:
+                    max_similarity = similarity
+
+            result = round(max_similarity, 4)
+            logger.debug(f"brand_similarity pour '{domain}' : {result}")
+            return result
+
+        except Exception as exc:
+            logger.warning(f"calculate_brand_similarity erreur pour '{domain}' : {exc}")
+            return EnrichedFeatureExtractor._FALLBACK_VALUES['brand_similarity']
+
+    # -----------------------------------------------------------------------
+    # Méthode principale : extract_enriched_features
+    # -----------------------------------------------------------------------
+
+    def extract_enriched_features(self, url: str) -> Optional[dict]:
+        """Extrait les 4 features enrichies pour une URL donnée.
+
+        Orchestre les 4 sous-méthodes dans l'ordre et retourne un dict
+        avec exactement 4 clés. En cas d'erreur partielle, la feature
+        concernée prend sa valeur de repli (pas d'exception levée).
+
+        Args:
+            url (str): URL complète à analyser (ex: "https://example.com/page").
+
+        Returns:
+            dict: Dictionnaire avec exactement 4 features enrichies,
+                  ou None si l'URL est invalide.
+
+        Example:
+            >>> extractor = EnrichedFeatureExtractor()
+            >>> extractor.extract_enriched_features("https://amazon.com")
+            {
+                'domain_age_days': 9908,
+                'country': 'US',
+                'has_valid_ssl': 1,
+                'brand_similarity': 1.0
+            }
+        """
+        if not isinstance(url, str) or not url.strip():
+            logger.warning("extract_enriched_features : URL vide ou non-string reçue.")
+            return None
+
+        url = url.strip()
+
+        # Extraire le domaine pur depuis l'URL
+        try:
+            parsed = urlparse(url)
+            # Retire le port éventuel du netloc (ex: "example.com:8080" → "example.com")
+            domain = parsed.netloc.split(':')[0].strip()
+
+            if not domain:
+                logger.warning(f"Impossible d'extraire le domaine de : '{url}'")
+                return None
+        except Exception as exc:
+            logger.error(f"Erreur parsing URL '{url}' : {exc}")
+            return None
+
+        logger.info(f"Extraction features enrichies pour domaine : '{domain}'")
+
+        # Appel des 4 sous-méthodes (chacune gère ses propres erreurs)
+        domain_age = self.get_domain_age_days(domain)
+        country    = self.get_country(domain)
+        has_ssl    = self.check_ssl_validity(domain)
+        brand_sim  = self.calculate_brand_similarity(domain)
+
+        features = {
+            'domain_age_days': domain_age,
+            'country':         country,
+            'has_valid_ssl':   has_ssl,
+            'brand_similarity': brand_sim,
+        }
+
+        assert len(features) == 4, "ERREUR INTERNE : nombre de features enrichies != 4"
+        logger.info(f"Features enrichies extraites pour '{domain}' : {features}")
+        return features
+
+    # -----------------------------------------------------------------------
+    # Traitement en masse : extract_from_dataframe
+    # -----------------------------------------------------------------------
+
+    def extract_from_dataframe(
+        self,
+        df: pd.DataFrame,
+        url_column: str = 'url',
+        delay_between_requests: float = 0.5,
+    ) -> pd.DataFrame:
+        """Applique extract_enriched_features à toutes les URLs d'un DataFrame.
+
+        Introduit un délai entre les requêtes pour respecter les rate limits
+        des APIs externes (URLScan.io notamment). Les lignes échouées sont
+        remplies de NaN et seront filtrées lors de l'étape E2-04.
+
+        Args:
+            df (pd.DataFrame): DataFrame contenant au moins une colonne d'URLs.
+            url_column (str): Nom de la colonne URL (défaut : 'url').
+            delay_between_requests (float): Délai en secondes entre deux URLs
+                                            (défaut : 0.5 s).
+
+        Returns:
+            pd.DataFrame: DataFrame original + 4 colonnes enrichies ajoutées.
+
+        Raises:
+            ValueError: Si la colonne url_column est absente du DataFrame.
+        """
+        if url_column not in df.columns:
+            raise ValueError(f"Colonne '{url_column}' introuvable dans le DataFrame.")
+
+        total = len(df)
+        logger.info(f"Extraction des features enrichies pour {total} URLs...")
+
+        enriched_rows = []
+        for i, url in enumerate(df[url_column], start=1):
+            logger.info(f"[{i}/{total}] Traitement : {url}")
+            features = self.extract_enriched_features(url)
+            enriched_rows.append(features)  # None → ligne de NaN dans le DataFrame final
+
+            # Pause pour ne pas surcharger les APIs externes
+            if i < total and delay_between_requests > 0:
+                time.sleep(delay_between_requests)
+
+        features_df = pd.DataFrame(enriched_rows, index=df.index)
+        result = pd.concat([df, features_df], axis=1)
+
+        failed = features_df['domain_age_days'].isna().sum()
+        logger.info(
+            f"Extraction enrichie terminée — {total - failed}/{total} URLs traitées "
+            f"({failed} échecs → NaN)."
+        )
+        return result
