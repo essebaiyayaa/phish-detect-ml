@@ -4,11 +4,13 @@ Script de collecte de données brutes — Projet Détection de Phishing.
 """
 
 import os
+import io
 import time
 import json
 import logging
 import argparse
 import gzip
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -357,7 +359,7 @@ class URLFeatureExtractor:
         """Applique extract_simple_features à toutes les URLs d'un DataFrame.
 
         Les lignes dont l'extraction échoue sont remplies de NaN (elles
-        seront ensuite supprimées lors du nettoyage E2-04).
+        seront ensuite supprimées lors du nettoyage ).
 
         Args:
             df          (pd.DataFrame): DataFrame contenant au moins une colonne d'URLs.
@@ -388,7 +390,7 @@ class URLFeatureExtractor:
 
 
 # ===========================================================================
-# E2-02 : Extraction des Features WHOIS/DNS Enrichies
+# Extraction des Features WHOIS/DNS Enrichies
 # ===========================================================================
 """
 Classe EnrichedFeatureExtractor : extrait les 4 features enrichies nécessitant
@@ -823,7 +825,7 @@ class EnrichedFeatureExtractor:
 
         Introduit un délai entre les requêtes pour respecter les rate limits
         des APIs externes (URLScan.io notamment). Les lignes échouées sont
-        remplies de NaN et seront filtrées lors de l'étape E2-04.
+        remplies de NaN et seront filtrées lors de l'étape de nettoyage.
 
         Args:
             df (pd.DataFrame): DataFrame contenant au moins une colonne d'URLs.
@@ -862,3 +864,195 @@ class EnrichedFeatureExtractor:
             f"({failed} échecs → NaN)."
         )
         return result
+
+# ===========================================================================
+# Collecte des URLs légitimes
+# ===========================================================================
+
+"""
+Collecte des URLs légitimes — supporte Tranco et Majestic Million (fallback).
+"""
+
+import requests
+import zipfile
+import io
+import time
+import logging
+from pathlib import Path
+
+import pandas as pd
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
+
+
+class LegitimateURLCollector:
+    """Collecte les URLs légitimes depuis Tranco ou Majestic Million.
+
+    Tranco combine 4 sources (Alexa archivé, Majestic, Umbrella, Chrome UX)
+    pour produire une liste fiable. Si Tranco échoue, Majestic Million est utilisé.
+
+    Example:
+        >>> collector = LegitimateURLCollector()
+        >>> df = collector.collect(num_urls=8500)
+        >>> df.shape
+        (8500, 2)
+    """
+
+    SOURCES = [
+        {
+            "name": "Tranco",
+            "url": "https://tranco-list.eu/download_daily/top-1m.csv.zip",
+            "format": "zip_csv"
+        },
+        {
+            "name": "Majestic Million",
+            "url": "https://downloads.majestic.com/majestic_million.csv",
+            "format": "direct_csv"
+        },
+    ]
+
+    def __init__(self, timeout: int = 60):
+        self.timeout = timeout
+        self._source_format = "zip_csv"  # défaut
+
+    # ── A : Téléchargement ────────────────────────────────────────────────────
+
+    def _download_zip(self) -> bytes:
+        """Essaie chaque source dans l'ordre jusqu'à succès."""
+        for source in self.SOURCES:
+            logger.info(f"Source : {source['name']} → {source['url']}")
+            for attempt in range(1, 4):
+                try:
+                    response = requests.get(source['url'], timeout=self.timeout)
+                    response.raise_for_status()
+                    size_mb = len(response.content) / 1024 / 1024
+                    logger.info(f"OK : {size_mb:.2f} MB depuis {source['name']}")
+                    self._source_format = source['format']
+                    self._source_name   = source['name']
+                    return response.content
+
+                except requests.exceptions.Timeout:
+                    logger.warning(f"Timeout tentative {attempt}/3...")
+                    time.sleep(2 ** attempt)
+                except requests.exceptions.ConnectionError as exc:
+                    logger.warning(f"Connexion échouée : {exc}")
+                    time.sleep(2 ** attempt)
+                except requests.exceptions.HTTPError:
+                    logger.warning(f"HTTP erreur — source ignorée ({source['name']})")
+                    break
+
+        raise requests.RequestException("Toutes les sources ont échoué.")
+
+    # ── B : Extraction CSV ────────────────────────────────────────────────────
+
+    def _extract_csv(self, content: bytes) -> pd.DataFrame:
+        """Extrait le DataFrame brut selon le format de la source."""
+        try:
+            if self._source_format == "zip_csv":
+                # Tranco : ZIP contenant un CSV (rank, domain)
+                z = zipfile.ZipFile(io.BytesIO(content))
+                csv_filename = z.namelist()[0]
+                logger.info(f"Fichier dans ZIP : {csv_filename}")
+                df = pd.read_csv(
+                    z.open(csv_filename),
+                    header=None,
+                    names=['rank', 'domain'],
+                    dtype={'rank': int, 'domain': str},
+                )
+
+            elif self._source_format == "direct_csv":
+                # Majestic : CSV direct, colonne 'Domain' = index 2
+                df_raw = pd.read_csv(io.BytesIO(content), dtype=str)
+                df = pd.DataFrame({
+                    'rank':   range(1, len(df_raw) + 1),
+                    'domain': df_raw.iloc[:, 2].values
+                })
+
+            logger.info(f"CSV chargé : {len(df):,} domaines disponibles")
+            return df
+
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"ZIP invalide : {exc}") from exc
+
+    # ── C : Transformation ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _transform_to_urls(df_raw: pd.DataFrame, num_urls: int) -> pd.DataFrame:
+        """Transforme les domaines en URLs HTTPS avec label is_phishing=0."""
+        if num_urls > len(df_raw):
+            raise ValueError(f"num_urls ({num_urls}) > domaines dispo ({len(df_raw)})")
+
+        df = df_raw.head(num_urls).copy()
+        df = df[df['domain'].notna()]
+        df = df[df['domain'].str.strip() != '']
+        df['domain'] = df['domain'].str.strip().str.lower()
+        df = df.drop_duplicates(subset=['domain'])
+        df['url'] = 'https://' + df['domain']
+        df['is_phishing'] = 0
+        df = df[['url', 'is_phishing']].reset_index(drop=True)
+        logger.info(f"Transformation OK : {len(df):,} URLs légitimes")
+        return df
+
+    # ── D : Validation ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate(df: pd.DataFrame, min_urls: int = 8500) -> None:
+        assert 'url'         in df.columns,                 "Colonne 'url' manquante"
+        assert 'is_phishing' in df.columns,                 "Colonne 'is_phishing' manquante"
+        assert len(df) >= min_urls,                         f"Trop peu d'URLs : {len(df)} < {min_urls}"
+        assert df['is_phishing'].eq(0).all(),               "Labels non-zéro détectés"
+        assert df['url'].isna().sum() == 0,                 "URLs NaN détectées"
+        assert df['url'].str.startswith('https://').all(),  "URLs sans https://"
+        assert df.duplicated(subset=['url']).sum() == 0,    "Doublons détectés"
+        logger.info("Validation : toutes les contraintes OK")
+
+    # ── E : Sauvegarde ────────────────────────────────────────────────────────
+
+    def _save(self, df: pd.DataFrame, output_path: str) -> None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False, encoding='utf-8')
+        size_kb = Path(output_path).stat().st_size / 1024
+        logger.info(f"Sauvegardé : {output_path} ({size_kb:.1f} KB, {len(df):,} lignes)")
+
+    # ── Pipeline principal ────────────────────────────────────────────────────
+
+    def collect(
+        self,
+        num_urls: int = 8500,
+        output_path: str = 'data/raw/legitimate_urls.csv',
+        force_download: bool = False,
+    ) -> pd.DataFrame:
+        """Pipeline complet : télécharge → transforme → valide → sauvegarde.
+
+        Args:
+            num_urls: Nombre d'URLs à collecter (défaut 8500).
+            output_path: Chemin de sortie CSV.
+            force_download: Re-télécharger même si fichier déjà présent.
+
+        Returns:
+            DataFrame avec colonnes ['url', 'is_phishing'].
+        """
+        logger.info("=" * 60)
+        logger.info("DÉBUT : Collecte URLs légitimes")
+        logger.info("=" * 60)
+
+        out_path = Path(output_path)
+
+        # Cache : évite re-téléchargement
+        if out_path.exists() and not force_download:
+            logger.info(f"Cache trouvé → chargement : {output_path}")
+            df_cached = pd.read_csv(output_path)
+            logger.info(f"Chargé : {len(df_cached):,} lignes")
+            return df_cached
+
+        content  = self._download_zip()
+        df_raw   = self._extract_csv(content)
+        df_legit = self._transform_to_urls(df_raw, num_urls)
+        self._validate(df_legit, min_urls=num_urls)
+        self._save(df_legit, output_path)
+
+        logger.info("=" * 60)
+        logger.info(f"TERMINÉ : {len(df_legit):,} URLs légitimes")
+        logger.info("=" * 60)
+        return df_legit
