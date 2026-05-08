@@ -1395,7 +1395,8 @@ class DatasetBuilder:
         logger.info(f"Parquet : {parquet_path} ({parquet_kb:.1f} KB, {len(df):,} lignes)")
 
         # Export CSV échantillon
-        df.head(sample_size).to_csv(csv_path, index=False, encoding='utf-8')
+        df_sample = df.sample(n=min(sample_size, len(df)), random_state=42)
+        df_sample.to_csv(csv_path, index=False, encoding='utf-8')
         csv_kb = Path(csv_path).stat().st_size / 1024
         logger.info(f"CSV     : {csv_path} ({csv_kb:.1f} KB, {sample_size} lignes)")
 
