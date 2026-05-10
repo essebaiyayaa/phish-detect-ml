@@ -151,47 +151,72 @@ class PhishTankCollector:
             return False
 
 
-
 def main():
-    """Orchestre la collecte brute des données PhishTank."""
+    """Point d'entrée principal pour la collecte et la construction du dataset."""
 
     parser = argparse.ArgumentParser(
-        description='Collecte brute PhishTank — Phase 1 Étudiant 1'
+        description='Pipeline de données Phishing — Détection ML'
+    )
+    parser.add_argument(
+        '--collect-only',
+        action='store_true',
+        help='Effectue uniquement la collecte brute PhishTank (Phase 1).'
+    )
+    parser.add_argument(
+        '--full-build',
+        action='store_true',
+        help='Lance la construction complète du dataset avec les 15 features (Phase 2).'
     )
     parser.add_argument(
         '--limit',
         type=int,
         default=None,
-        help='Nombre max d\'URLs à conserver. Ex: --limit 100 pour tester, omettre pour tout télécharger.'
+        help='Nombre max d\'URLs à collecter (PhishTank).'
+    )
+    parser.add_argument(
+        '--no-enrich',
+        action='store_false',
+        dest='enrich',
+        default=True,
+        help='Désactive les 4 features enrichies (WHOIS/SSL/GeoIP) pour un build rapide.'
     )
     args = parser.parse_args()
 
-    logging.info("=== Lancement du pipeline de collecte brute (Phase 1 — Étudiant 1) ===")
+    logging.info("=== Lancement du pipeline de données Phish-Detect ===")
 
-    collector = PhishTankCollector()
-    raw_path = Path("data/raw/phishtank_raw.json")
-    
-    logging.info("PhishTank fournit un dump complet — pagination non requise pour cette source.")
-
-    if raw_path.exists():
-        logging.info("Fichier déjà présent — chargement local pour éviter de re-requêter.")
-        if args.limit is not None:
-            logging.warning("Fichier en cache trouvé — l'argument --limit est ignoré.")
-        with open(raw_path, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-    else:
+    # 1. Phase de collecte brute (si nécessaire ou forcé)
+    if args.collect_only or not Path("data/raw/phishtank_raw.json").exists():
+        logging.info("--- Étape 1 : Collecte brute PhishTank ---")
+        collector = PhishTankCollector()
         raw_data = collector.fetch_raw_data(limit=args.limit)
+        if raw_data:
+            collector.save_raw_json(raw_data)
         
-        if not raw_data:
-            logging.error("Échec critique de la collecte. Pipeline arrêté.")
+        if args.collect_only:
             return
 
-        success = collector.save_raw_json(raw_data, filepath=str(raw_path))
-        if not success:
-            logging.error("Échec de la sauvegarde.")
-            return
+    # 2. Phase de construction du dataset
+    if args.full_build:
+        logging.info("--- Étape 2 : Construction du Dataset (15 features) ---")
+        
+        # S'assurer que les URLs légitimes sont collectées
+        legit_path = "data/raw/legitimate_urls.csv"
+        if not Path(legit_path).exists():
+            logging.info("URLs légitimes absentes → Lancement du LegitimateURLCollector...")
+            legit_collector = LegitimateURLCollector()
+            legit_collector.collect(num_urls=9000) # Un peu plus que 8500 pour avoir de la marge
 
-    logging.info("=== Collecte terminée. Fichier data/raw/phishtank_raw.json prêt. ===")
+        # Lancer le builder final
+        builder = DatasetBuilder(enrich=args.enrich)
+        builder.build(
+            phishing_path='data/raw/phishtank_raw.json',
+            legitimate_path=legit_path,
+            parquet_path='data/dataset.parquet',
+            csv_path='data/sample.csv'
+        )
+    else:
+        logging.info("Mode par défaut : Utilisez --full-build pour générer le dataset final.")
+        logging.info("Exemple : python src/data_collection.py --full-build")
 
 
 # ===========================================================================
@@ -1485,3 +1510,7 @@ class DatasetBuilder:
 
         logger.info("COMPLETE — dataset pret pour le modele ML")
         return df
+
+
+if __name__ == "__main__":
+    main()
