@@ -72,7 +72,7 @@ Pour répondre à notre problématique, le système de détection doit atteindre
 | # | Objectif Métier | Seuil cible |
 |---|---|---|
 | 1 | **Efficacité de détection** — Bloquer les sites de phishing avant que l'utilisateur les atteigne | ≥ 90 % des phishings détectés |
-| 2 | **Expérience utilisateur** — Limiter les fausses alertes (blocage de sites légitimes) | Taux de faux positifs < 5 % |
+| 2 | **Expérience utilisateur** — Limiter les fausses alertes (blocage de sites légitimes) | Taux de faux positifs < 10 % (compromis accepté avec le threshold à 0.3) |
 | 3 | **Performance système** — Garantir une analyse en temps réel | Latence d'inférence < 200 ms par URL |
 
 ---
@@ -82,8 +82,8 @@ Pour répondre à notre problématique, le système de détection doit atteindre
 | Objectif Métier | Objectif Machine Learning | Métrique ML associée |
 |:---|:---|:---|
 | Détecter 90 % des sites de phishing | Maximiser l'identification de la classe minoritaire « Phishing » (classe 1) | **Recall ≥ 0.90** |
-| Limiter les faux blocages (< 5 %) | Maintenir une proportion d'erreurs acceptable sur les prédictions positives | **Precision ≥ 0.80** |
-| Équilibrer détection et précision | Optimiser le compromis Recall/Precision globalement | **F1-Score ≥ 0.85** |
+| Limiter les faux blocages (< 10 %) | Maintenir une Precision acceptable malgré le threshold abaissé à 0.3 | **Precision ≥ 0.65** |
+| Équilibrer détection et précision | Optimiser le compromis Recall/Precision globalement | **F1-Score ≥ 0.80** |
 | Gérer le déséquilibre naturel (5–25 %) | Évaluer sur une métrique robuste au déséquilibre de classes | **PR-AUC ≥ 0.85** |
 
 ---
@@ -127,7 +127,7 @@ ce qui illustre l'impact financier catastrophique d'un seul incident non détect
 
 Puisque le coût d'un Faux Négatif est immensément supérieur à celui d'un Faux Positif, **notre modèle doit absolument éliminer les Faux Négatifs en priorité**. Nous acceptons délibérément de bloquer quelques sites légitimes par excès de prudence.
 
-**Ajustement technique :** Le seuil de décision (`threshold`) sera **abaissé à 0.3** (au lieu de 0.5 par défaut) pour forcer le modèle à déclencher une alerte plus facilement, maximisant le Recall au détriment acceptable de la Precision.
+**Ajustement technique :** Le seuil de décision (`threshold`) sera **abaissé à 0.3** (au lieu de 0.5 par défaut) pour forcer le modèle à déclencher une alerte plus facilement, maximisant le Recall au détriment acceptable de la Precision. Cette décision implique d'accepter une Precision réduite (cible révisée à ≥ 0.65), la priorité absolue restant le Recall.
 
 ---
 
@@ -138,7 +138,7 @@ Puisque le coût d'un Faux Négatif est immensément supérieur à celui d'un Fa
 | Métrique | Rôle | Justification |
 |---|---|---|
 | **Recall** *(métrique principale)* | Mesure la capacité à ne rater aucun phishing | Répond directement à l'objectif de bloquer 90 % des fraudes ; minimise les Faux Négatifs dont le coût est catastrophique |
-| **F1-Score** *(métrique secondaire)* | Équilibre Recall et Precision | S'assure que la maximisation du Recall ne détruit pas entièrement la Precision (ce qui générerait trop de Faux Positifs) |
+| **F1-Score** *(métrique secondaire)* | Équilibre Recall et Precision | S'assure que la maximisation du Recall ne détruit pas entièrement la Precision — cible F1 ≥ 0.80 cohérente avec Recall ≥ 0.90 et Precision ≥ 0.65 |
 | **PR-AUC** | Évalue le modèle sur l'ensemble du spectre de seuils | Spécialement adapté aux classes déséquilibrées : la courbe PR reste fiable quand la classe négative est surreprésentée |
 
 ### 5.2. Métriques refusées
