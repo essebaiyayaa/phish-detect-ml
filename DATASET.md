@@ -1,7 +1,6 @@
 # Documentation du Dataset — Détection de Phishing
 
 **Projet :** Détection de Phishing par Machine Learning
-**Auteur :** Étudiant 3 — Documentation & Exploration
 **Version :** 2.0 | Date : 2026-05-15
 
 ---

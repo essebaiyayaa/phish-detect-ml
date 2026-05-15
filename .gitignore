@@ -16,3 +16,5 @@ __pycache__/
 # Data
 # data/raw/*.json
 # data/*.parquet
+projet_pishing.md
+repartition_taches.md
