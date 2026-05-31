@@ -17,4 +17,5 @@ __pycache__/
 # data/raw/*.json
 # data/*.parquet
 projet_pishing.md
+scratch/
 repartition_taches.md
