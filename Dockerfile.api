@@ -1,0 +1,79 @@
+# ============================================================
+#  Dockerfile.api  —  Image Docker pour l'API FastAPI
+#  Projet : Phish-Detect ML  |  Phase 4 — Conteneurisation
+# ============================================================
+#
+#  EXPLICATION DES CHOIX :
+#  - python:3.11-slim : image officielle Python 3.11 minimale basée sur Debian
+#    (~130 MB) au lieu de python:3.11 (~900 MB). Moins d'outils, mais suffisant.
+#  - Les couches sont ordonnées pour maximiser le CACHE Docker :
+#    requirements.txt (change rarement) → installé AVANT le code (change souvent)
+# ============================================================
+
+# ── 1. Image de base ─────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# ── 2. Métadonnées de l'image ────────────────────────────────────────────────
+LABEL maintainer="equipe-phish-detect" \
+      version="1.0.0" \
+      service="api-fastapi" \
+      description="API FastAPI de détection de phishing par analyse de features URL"
+
+# ── 3. Variables d'environnement ─────────────────────────────────────────────
+# PYTHONDONTWRITEBYTECODE : ne pas générer de fichiers .pyc (inutiles en conteneur)
+# PYTHONUNBUFFERED       : afficher les logs Python immédiatement (sans buffer)
+# APP_PORT               : port d'écoute (configurable via docker-compose)
+# LOG_LEVEL              : niveau de log uvicorn (info | debug | warning | error)
+# MODEL_PATH             : chemin vers le fichier .joblib dans le conteneur
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_PORT=8000 \
+    LOG_LEVEL=info \
+    MODEL_PATH=/app/models/final_model.joblib
+
+# ── 4. Répertoire de travail ─────────────────────────────────────────────────
+# Toutes les commandes suivantes s'exécutent depuis /app dans le conteneur
+WORKDIR /app
+
+# ── 5. Dépendances système ────────────────────────────────────────────────────
+# python-whois nécessite le binaire 'whois' sur certains systèmes Debian
+# --no-install-recommends : éviter les paquets recommandés inutiles
+# rm -rf /var/lib/apt/lists/* : supprimer le cache apt → image plus légère
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        whois \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 6. Dépendances Python (AVANT le code — pour bénéficier du cache Docker) ──
+# Si on copie requirements.txt en premier et que ce fichier ne change pas,
+# Docker réutilise la couche pip install au lieu de tout réinstaller.
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# ── 7. Code source de l'application ─────────────────────────────────────────
+COPY app/ app/
+COPY src/ src/
+
+# ── 8. Modèle ML ─────────────────────────────────────────────────────────────
+# Le modèle est aussi géré via un volume dans docker-compose (voir docker-compose.yml)
+# Cette COPY sert de fallback si on lance le conteneur seul (sans docker-compose)
+COPY models/ models/
+
+# ── 9. Exposition du port ────────────────────────────────────────────────────
+# EXPOSE est déclaratif : informe Docker que le conteneur écoute sur ce port.
+# Le vrai mapping hôte↔conteneur se fait dans docker-compose.yml (ports:)
+EXPOSE 8000
+
+# ── 10. Healthcheck intégré au Dockerfile ────────────────────────────────────
+# Docker vérifie toutes les 30s que l'API répond sur /health
+# --start-period : délai de grâce au démarrage (l'API charge le modèle ~10s)
+# --retries 3    : 3 échecs consécutifs → conteneur marqué "unhealthy"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
+    || exit 1
+
+# ── 11. Commande de démarrage ────────────────────────────────────────────────
+# sh -c permet d'utiliser les variables d'environnement ($APP_PORT, $LOG_LEVEL)
+# --host 0.0.0.0 : écouter sur toutes les interfaces réseau du conteneur
+#                  (pas seulement 127.0.0.1 qui serait inaccessible depuis l'hôte)
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT} --log-level ${LOG_LEVEL}"]
