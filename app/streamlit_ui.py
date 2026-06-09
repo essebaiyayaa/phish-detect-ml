@@ -1,5 +1,5 @@
 import streamlit as st
-import joblib
+import requests
 import pandas as pd
 import numpy as np
 import sys
@@ -324,6 +324,35 @@ st.markdown("""
     .batch-stat-val { font-size: 1.8rem; font-weight: 800; color: #1e293b; }
     .batch-stat-lbl { font-size: 0.78rem; color: #64748b; font-weight: 500; margin-top: 2px; }
 
+    /* ── API status badge ── */
+    .api-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    }
+    .api-badge.online {
+        background: rgba(34,197,94,0.15);
+        color: #22c55e;
+        border: 1px solid rgba(34,197,94,0.3);
+    }
+    .api-badge.offline {
+        background: rgba(244,63,94,0.15);
+        color: #f43f5e;
+        border: 1px solid rgba(244,63,94,0.3);
+    }
+    .api-dot {
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .api-badge.online .api-dot { background: #22c55e; }
+    .api-badge.offline .api-dot { background: #f43f5e; }
+
     /* hide streamlit elements */
     #MainMenu, footer { visibility: hidden; }
     .block-container { padding-top: 1.5rem; }
@@ -331,38 +360,76 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-# Lire MODEL_PATH depuis la variable d'environnement (Docker) ou chemin local par défaut
-_model_path_env = os.environ.get("MODEL_PATH", None)
-MODEL_PATH = Path(_model_path_env) if _model_path_env else ROOT / "models" / "final_model.joblib"
-THRESHOLD  = 0.3
+# URL de l'API FastAPI (Docker : http://api:8000, local : http://localhost:8000)
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
+THRESHOLD = 0.3
 use_enriched = True
 
-# ─── Chargement du modèle ─────────────────────────────────────────────────────
-@st.cache_resource
-def load_model():
-    if not MODEL_PATH.exists():
+
+# ─── Vérification de la connectivité API ──────────────────────────────────────
+@st.cache_data(ttl=30)
+def check_api_health() -> bool:
+    """Vérifie si l'API FastAPI est accessible."""
+    try:
+        r = requests.get(f"{API_URL}/health", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def get_model_info() -> dict | None:
+    """Récupère les métadonnées du modèle depuis l'API."""
+    try:
+        r = requests.get(f"{API_URL}/model/info", timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+# ─── Appel API pour prédiction unitaire ───────────────────────────────────────
+def predict_via_api(features: dict) -> dict | None:
+    """Envoie les 15 features à POST /predict et retourne la réponse."""
+    try:
+        r = requests.post(f"{API_URL}/predict", json=features, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            st.error(f"Erreur API ({r.status_code}) : {r.text}")
+            return None
+    except requests.ConnectionError:
+        st.error(f"Impossible de joindre l'API à `{API_URL}`. Vérifiez que le service est démarré.")
         return None
-    return joblib.load(MODEL_PATH)
+    except Exception as e:
+        st.error(f"Erreur lors de l'appel API : {e}")
+        return None
 
-# ─── Feature engineering (identique au pipeline d'entraînement) ───────────────
-def categorize_domain_age(age):
-    if age == -1:    return 'inconnu'
-    elif age <= 30:  return 'nouveau'
-    elif age <= 365: return 'recent'
-    elif age <= 3650:return 'etabli'
-    else:            return 'ancien'
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df['url_to_domain_ratio']  = df['path_length'] / (df['url_length'] + 1)
-    df['domain_age_category']  = df['domain_age_days'].apply(categorize_domain_age)
-    df['special_char_density'] = (
-        (df['num_hyphens'] + df['num_underscores'] + df['num_at_signs'])
-        / (df['url_length'] + 1)
-    )
-    for cat in ["US", "DE", "OTHER", "UNKNOWN"]:
-        df[f'country_{cat}'] = (df['country'] == cat).astype(int)
-    return df
+# ─── Appel API pour prédiction batch ──────────────────────────────────────────
+def predict_batch_via_api(features_list: list[dict]) -> list[dict] | None:
+    """Envoie un CSV de features à POST /predict/batch et retourne les résultats."""
+    try:
+        df = pd.DataFrame(features_list)
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_bytes = csv_buffer.getvalue().encode("utf-8")
+
+        files = {"file": ("batch.csv", csv_bytes, "text/csv")}
+        r = requests.post(f"{API_URL}/predict/batch", files=files, timeout=60)
+        if r.status_code == 200:
+            result_df = pd.read_csv(io.StringIO(r.text))
+            return result_df.to_dict("records")
+        else:
+            st.error(f"Erreur API batch ({r.status_code}) : {r.text}")
+            return None
+    except requests.ConnectionError:
+        st.error(f"Impossible de joindre l'API à `{API_URL}`.")
+        return None
+    except Exception as e:
+        st.error(f"Erreur lors de l'appel batch : {e}")
+        return None
+
 
 # ─── Confidence ───────────────────────────────────────────────────────────────
 def get_confidence(proba: float) -> tuple[str, str]:
@@ -370,6 +437,7 @@ def get_confidence(proba: float) -> tuple[str, str]:
     if distance > 0.4:   return "Haute", "#22c55e"
     elif distance > 0.2: return "Moyenne", "#f59e0b"
     else:                return "Basse", "#ef4444"
+
 
 # ─── Explications textuelles ──────────────────────────────────────────────────
 def explain_prediction(features: dict, proba: float) -> list[str]:
@@ -398,6 +466,7 @@ def explain_prediction(features: dict, proba: float) -> list[str]:
         else:
             reasons.append("<i class='fa-solid fa-check'></i> L'ensemble des caractéristiques correspond à un profil de site légitime.")
     return reasons[:5]
+
 
 # ─── Extraction des features depuis une URL ────────────────────────────────────
 def extract_features_from_url(url: str, use_enriched: bool = True) -> dict | None:
@@ -432,6 +501,7 @@ def extract_features_from_url(url: str, use_enriched: bool = True) -> dict | Non
 
     return {**simple, **enriched}
 
+
 # ─── Rendu jauge de probabilité ───────────────────────────────────────────────
 def render_gauge(proba: float, is_phishing: bool):
     color = "#f43f5e" if is_phishing else "#22c55e"
@@ -451,7 +521,10 @@ def render_gauge(proba: float, is_phishing: bool):
     </div>
     """, unsafe_allow_html=True)
 
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
+api_online = check_api_health()
+
 with st.sidebar:
     st.markdown("""
     <div class="sidebar-logo">
@@ -467,12 +540,12 @@ with st.sidebar:
     )
 
 
+
 # ─── Analyse par lot (helper) ───────────────────────────────────────────────
 def _run_batch_analysis(df: pd.DataFrame, use_enriched: bool):
     """Lance l'analyse par lot sur un DataFrame contenant une colonne 'url'."""
-    model = load_model()
-    if model is None:
-        st.error("⚠️ Modèle introuvable. Vérifiez `models/final_model.joblib`.")
+    if not api_online:
+        st.error("⚠️ L'API n'est pas accessible. Lancez le serveur FastAPI avant d'utiliser le mode batch.")
         return
 
     urls = df["url"].dropna().tolist()
@@ -486,6 +559,7 @@ def _run_batch_analysis(df: pd.DataFrame, use_enriched: bool):
         if not url_clean.startswith(("http://", "https://")):
             url_clean = "https://" + url_clean
 
+        # Étape 1 : Extraction locale des features
         feats = extract_features_from_url(url_clean, use_enriched=use_enriched)
         if feats is None:
             results.append({
@@ -493,17 +567,17 @@ def _run_batch_analysis(df: pd.DataFrame, use_enriched: bool):
                 "probabilite": None
             })
         else:
-            try:
-                df_in  = pd.DataFrame([feats])
-                df_in  = engineer_features(df_in)
-                proba  = float(model.predict_proba(df_in)[0, 1])
-                pred   = "Phishing" if proba >= THRESHOLD else "Légitime"
-                conf   = get_confidence(proba)[0]
+            # Étape 2 : Envoi des features à l'API pour prédiction
+            api_result = predict_via_api(feats)
+            if api_result is not None:
+                pred = "Phishing" if api_result["prediction"] == "phishing" else "Légitime"
                 results.append({
-                    "url": url, "prediction": pred,
-                    "probabilite": f"{proba:.1%}"
+                    "url": url,
+                    "prediction": pred,
+                    "probabilite": f"{api_result['probability']:.1%}",
+                    "confiance": api_result["confidence"],
                 })
-            except Exception:
+            else:
                 results.append({
                     "url": url, "prediction": "erreur",
                     "probabilite": None
@@ -519,7 +593,7 @@ def _run_batch_analysis(df: pd.DataFrame, use_enriched: bool):
     n_err    = (df_results["prediction"] == "erreur").sum()
     pct_ph   = n_phish / n * 100 if n > 0 else 0
 
-    st.success(f"Analyse terminée — {n} URLs traitées")
+    st.success(f"Analyse terminée — {n} URLs traitées via l'API")
 
     cm1, cm2, cm3, cm4 = st.columns(4)
     cm1.metric("Total URLs", n)
@@ -562,7 +636,7 @@ if page == "Analyser une URL":
             <span><i class="fa-solid fa-link"></i></span> Entrez l'URL à vérifier
         </div>
         <div class="url-card-sub">
-            Collez l'adresse web que vous souhaitez analyser. 
+            Collez l'adresse web que vous souhaitez analyser.
         </div>
     """, unsafe_allow_html=True)
 
@@ -589,8 +663,8 @@ if page == "Analyser une URL":
 
     for col, (label, url_ex) in zip([col_ex1, col_ex2, col_ex3, col_ex4], example_urls.items()):
         col.button(
-            label, 
-            use_container_width=True, 
+            label,
+            use_container_width=True,
             key=f"ex_{label}",
             on_click=set_example_url,
             args=(url_ex,)
@@ -613,48 +687,53 @@ if page == "Analyser une URL":
         if not url_clean.startswith(("http://", "https://")):
             url_clean = "https://" + url_clean
 
-        with st.spinner(""):
-            # Progress feedback visuel
-            progress_placeholder = st.empty()
+        # Vérifier que l'API est accessible
+        if not api_online:
+            st.error(
+                f"L'API FastAPI n'est pas accessible à `{API_URL}`. "
+                "Lancez le serveur avec `docker-compose up` ou `uvicorn app.main:app --reload`."
+            )
+        else:
+            with st.spinner(""):
+                # Progress feedback visuel
+                progress_placeholder = st.empty()
 
-            if use_enriched:
                 steps = [
-                    ("Analyse de la structure de l'URL...", False),
-                    ("Vérification WHOIS (âge du domaine)...", False),
-                    ("Vérification du certificat SSL...", False),
-                    ("Calcul de la similarité de marque...", False),
-                    ("Prédiction par le modèle Random Forest...", False),
+                    "Extraction des caractéristiques de l'URL...",
+                    "Vérification WHOIS (âge du domaine)...",
+                    "Vérification du certificat SSL...",
+                    "Calcul de la similarité de marque...",
+                    "Envoi des features à l'API FastAPI...",
+                    "Prédiction par le modèle Random Forest...",
                 ]
                 progress_placeholder.markdown(f"""
                 <div class="loading-box">
                     <div style="font-size:1.1rem; font-weight:700; color:#a5b4fc; margin-bottom:1rem;">
                         <i class="fa-solid fa-hourglass-half"></i> Analyse en cours...
                     </div>
-                    {''.join(f'<div class="loading-step active">◉ {s[0]}</div>' for s in steps)}
+                    {''.join(f'<div class="loading-step active">◉ {s}</div>' for s in steps)}
                 </div>
                 """, unsafe_allow_html=True)
 
-            features = extract_features_from_url(url_clean, use_enriched=use_enriched)
-            progress_placeholder.empty()
+                # Étape 1 : Extraction locale des features
+                features = extract_features_from_url(url_clean, use_enriched=use_enriched)
+                progress_placeholder.empty()
 
-        if features is None:
-            st.error(
-                "Impossible d'analyser cette URL. Vérifiez qu'elle est correctement formée "
-                "(ex : `https://example.com`)."
-            )
-        else:
-            try:
-                model = load_model()
-                if model is None:
-                    st.error(
-                        "Le fichier modèle `models/final_model.joblib` est introuvable. "
-                        "Assurez-vous d'avoir entraîné et sauvegardé le modèle."
-                    )
+            if features is None:
+                st.error(
+                    "Impossible d'analyser cette URL. Vérifiez qu'elle est correctement formée "
+                    "(ex : `https://example.com`)."
+                )
+            else:
+                # Étape 2 : Envoi des features à l'API pour prédiction
+                api_result = predict_via_api(features)
+
+                if api_result is None:
+                    st.error("L'API n'a pas pu traiter cette requête.")
                 else:
-                    df_input = pd.DataFrame([features])
-                    df_input = engineer_features(df_input)
-                    proba       = float(model.predict_proba(df_input)[0, 1])
-                    is_phishing = proba >= THRESHOLD
+                    proba       = api_result["probability"]
+                    is_phishing = api_result["prediction"] == "phishing"
+                    threshold   = api_result["threshold"]
                     conf_label, conf_color = get_confidence(proba)
                     reasons     = explain_prediction(features, proba)
 
@@ -683,72 +762,11 @@ if page == "Analyser une URL":
                             <div class="result-desc">
                                 Notre modèle a analysé cette URL et estime avec une probabilité de
                                 <b>{proba:.1%}</b> seulement qu'il s'agit d'un site malveillant
-                                (en-dessous du seuil d'alerte de {THRESHOLD:.0%}).<br>
+                                (en-dessous du seuil d'alerte de {threshold:.0%}).<br>
                                 Restez néanmoins vigilant avant de saisir des informations sensibles.
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-
-                    # ── Jauge ───────────────────────────────────────────────
-                    render_gauge(proba, is_phishing)
-
-                    # ── Métriques en colonnes ───────────────────────────────
-                    cm1, cm2, cm3 = st.columns(3)
-                    cm1.metric("Probabilité de phishing", f"{proba:.1%}", delta=None)
-                    cm2.metric("Seuil de décision", f"{THRESHOLD:.0%}")
-                    cm3.metric("Niveau de confiance", conf_label)
-
-                    # ── Explications ────────────────────────────────────────
-                    st.markdown("#### <i class='fa-solid fa-brain'></i> Pourquoi ce résultat ?", unsafe_allow_html=True)
-                    for r in reasons:
-                        st.markdown(f"- {r}", unsafe_allow_html=True)
-
-                    # ── Détail des features extraites (expander) ────────────
-                    with st.expander("Voir les caractéristiques extraites automatiquement"):
-                        st.markdown(
-                            "<div style='font-size:0.85rem; color:#64748b; margin-bottom:1rem;'>"
-                            "Ces valeurs ont été extraites automatiquement depuis l'URL sans intervention de votre part."
-                            "</div>", unsafe_allow_html=True
-                        )
-
-                        col_f1, col_f2, col_f3 = st.columns(3)
-
-                        with col_f1:
-                            st.markdown("**<i class='fa-solid fa-link'></i> Structure de l'URL**", unsafe_allow_html=True)
-                            feat_rows = [
-                                ("Longueur totale", features['url_length'], "px"),
-                                ("Longueur du domaine", features['domain_length'], "px"),
-                                ("Nombre de points", features['num_dots'], ""),
-                                ("Sous-domaines", features['num_subdomains'], ""),
-                                ("Tirets (-)", features['num_hyphens'], ""),
-                                ("Underscores (_)", features['num_underscores'], ""),
-                                ("Arobase (@)", features['num_at_signs'], ""),
-                                ("Longueur du chemin", features['path_length'], "px"),
-                            ]
-                            for name, val, unit in feat_rows:
-                                st.markdown(f"**{name}** : `{val}{unit}`")
-
-                        with col_f2:
-                            st.markdown("**<i class='fa-solid fa-shield'></i> Sécurité**", unsafe_allow_html=True)
-                            def yesno(v): return "Oui" if v == 1 else "Non"
-                            st.markdown(f"**HTTPS** : {yesno(features['has_https'])}")
-                            st.markdown(f"**SSL valide** : {yesno(features['has_valid_ssl'])}")
-                            st.markdown(f"**Port explicite** : {yesno(features['has_port'])}")
-                            st.markdown(f"**'http' dans domaine** : {'Oui (Suspect)' if features['has_http_in_domain'] else 'Non'}")
-
-                        with col_f3:
-                            st.markdown("**<i class='fa-solid fa-globe'></i> Domaine & Réputation**", unsafe_allow_html=True)
-                            age = features['domain_age_days']
-                            age_display = f"{age} jours" if age != -1 else "Inconnu"
-                            st.markdown(f"**Âge du domaine** : `{age_display}`")
-                            st.markdown(f"**Pays hébergeur** : `{features['country']}`")
-                            st.markdown(f"**Similarité marque** : `{features['brand_similarity']:.2f}/1.00`")
-
-
-
-            except Exception as e:
-                st.error(f"Erreur lors de la prédiction : {e}", icon="❌")
-                st.info("Vérifiez que le modèle `models/final_model.joblib` est présent et valide.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -759,7 +777,7 @@ elif page == "Analyse par lot (CSV)":
     st.markdown("""
     <div style="text-align: center; margin-bottom: 2rem;">
         <h2><i class="fa-solid fa-folder-open"></i> Analyse par lot — fichier CSV d'URLs</h2>
-        <p style="color: #64748b;">Uploadez un fichier CSV contenant une colonne <code>url</code>. Le système extraira automatiquement toutes les caractéristiques et retournera les prédictions pour chaque URL.</p>
+        <p style="color: #64748b;">Uploadez un fichier CSV contenant une colonne <code>url</code>. Le système extraira automatiquement toutes les caractéristiques et les enverra à l'API pour prédiction.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -888,23 +906,23 @@ else:
         <div class="about-card">
             <h4><i class="fa-solid fa-tree"></i> Algorithme : Random Forest Classifier</h4>
             <p>
-                PhishGuard repose sur un Random Forest (100 arbres de décision) — 
+                PhishGuard repose sur un Random Forest (500 arbres de décision) —
                 un algorithme d'apprentissage automatique robuste qui combine de multiples
                 décisions pour produire une prédiction fiable et stable.
             </p>
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("#### <i class='fa-solid fa-arrows-spin'></i> Pipeline automatique en 3 étapes", unsafe_allow_html=True)
+        st.markdown("#### <i class='fa-solid fa-arrows-spin'></i> Architecture en 3 étapes", unsafe_allow_html=True)
         st.markdown("""
-        1. **Extraction des features structurelles** (instantané)
-           → Longueur, points, tirets, HTTPS, port, sous-domaines…
+        1. **Extraction des features** (côté client Streamlit)
+           → Longueur, points, tirets, HTTPS, port, sous-domaines, WHOIS, SSL…
 
-        2. **Analyse enrichie** (WHOIS, SSL, URLScan.io, difflib)
-           → Âge du domaine, pays, certificat SSL, similarité avec des marques connues
+        2. **Envoi à l'API REST** (FastAPI — `POST /predict`)
+           → Les 15 features sont envoyées au format JSON au serveur
 
-        3. **Prédiction par le modèle** (Random Forest)
-           → Résultat clair : *Risque élevé* ou *Risque faible*, avec probabilité
+        3. **Prédiction par le modèle** (côté serveur API)
+           → Feature engineering + Random Forest → Résultat JSON avec probabilité
         """)
 
         st.markdown("#### <i class='fa-solid fa-list-check'></i> Les 15 features analysées", unsafe_allow_html=True)
@@ -939,54 +957,56 @@ else:
             """, unsafe_allow_html=True)
 
     with tab3:
-        st.markdown("#### <i class='fa-solid fa-chart-bar'></i> Métriques de performance du modèle", unsafe_allow_html=True)
+        st.markdown("#### <i class='fa-solid fa-chart-bar'></i> Métriques de performance (validation croisée 5-fold)", unsafe_allow_html=True)
 
         st.markdown("""
         <table class="metric-table">
             <tr>
                 <th>Métrique</th>
                 <th>Random Forest ✓</th>
-                <th>Régression Logistique</th>
-                <th>Gradient Boosting</th>
-            </tr>
-            <tr>
-                <td>Recall (classe phishing)</td>
-                <td class="best">92%</td>
-                <td class="ok">84%</td>
-                <td class="ok">90%</td>
+                <th>LightGBM</th>
+                <th>SVM</th>
+                <th>MLP</th>
             </tr>
             <tr>
                 <td>F1-Score</td>
-                <td class="best">85%</td>
-                <td class="ok">79%</td>
-                <td class="ok">83%</td>
+                <td class="best">99.6%</td>
+                <td class="ok">99.5%</td>
+                <td class="ok">98.7%</td>
+                <td class="ok">98.7%</td>
             </tr>
             <tr>
-                <td>Accuracy</td>
-                <td class="best">89%</td>
-                <td class="ok">82%</td>
-                <td class="ok">87%</td>
+                <td>Precision</td>
+                <td class="best">99.7%</td>
+                <td class="ok">99.6%</td>
+                <td class="ok">99.3%</td>
+                <td class="ok">99.3%</td>
             </tr>
             <tr>
-                <td>PR-AUC</td>
-                <td class="best">0.91</td>
-                <td class="ok">0.83</td>
-                <td class="ok">0.89</td>
+                <td>Recall</td>
+                <td class="best">99.6%</td>
+                <td class="ok">99.4%</td>
+                <td class="ok">98.1%</td>
+                <td class="ok">98.1%</td>
+            </tr>
+            <tr>
+                <td>ROC-AUC</td>
+                <td class="best">1.000</td>
+                <td class="ok">1.000</td>
+                <td class="ok">1.000</td>
+                <td class="ok">1.000</td>
             </tr>
         </table>
         """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Recall", "92%", help="Taux de détection des vrais phishings")
-        col_m2.metric("F1-Score", "85%", help="Équilibre précision/rappel")
-        col_m3.metric("Seuil optimal", "0.30", help="Optimisé pour maximiser le recall")
-
-        st.info("""
-        **Choix du seuil à 0.30 :** Le seuil de décision a été abaissé à 30% (vs 50% par défaut)
-        pour maximiser le **recall** — il vaut mieux signaler un faux positif que manquer un vrai phishing.
-        """)
+        st.markdown("##### Métriques sur le jeu de test (seuil par défaut 0.50)")
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Accuracy", "98.1%", help="Précision globale sur le jeu de test")
+        col_m2.metric("Precision", "100%", help="Aucun faux positif au seuil 0.5")
+        col_m3.metric("Recall", "89.3%", help="Taux de détection des vrais phishings")
+        col_m4.metric("F1-Score", "94.4%", help="Équilibre précision/rappel")
 
     with tab4:
         st.markdown("""
@@ -1013,3 +1033,12 @@ else:
         - En cas de doute, accédez directement au site officiel via votre navigateur
         - Utilisez un gestionnaire de mots de passe (alerte automatique sur les faux sites)
         """)
+
+# ─── Footer ───────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown(
+    '<p style="font-size:0.8rem; color:#484f58; text-align:center;">'
+    'Projet de fin de module Machine Learning · ENSATé 2025-2026'
+    '</p>',
+    unsafe_allow_html=True
+)
