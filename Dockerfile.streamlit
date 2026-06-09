@@ -1,0 +1,68 @@
+# ============================================================
+#  Dockerfile.streamlit  —  Image Docker pour l'UI Streamlit
+#  Projet : Phish-Detect ML  |  Phase 4 — Conteneurisation
+# ============================================================
+#
+#  Même structure que Dockerfile.api, mais :
+#  - Expose le port 8501 (port par défaut de Streamlit)
+#  - La commande de démarrage utilise 'streamlit run' avec des options
+#    spéciales pour fonctionner correctement dans un conteneur
+# ============================================================
+
+# ── 1. Image de base ─────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# ── 2. Métadonnées ───────────────────────────────────────────────────────────
+LABEL maintainer="equipe-phish-detect" \
+      version="1.0.0" \
+      service="ui-streamlit" \
+      description="Interface utilisateur PhishGuard — Détecteur de phishing"
+
+# ── 3. Variables d'environnement ─────────────────────────────────────────────
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    STREAMLIT_PORT=8501 \
+    MODEL_PATH=/app/models/final_model.joblib
+
+# ── 4. Répertoire de travail ─────────────────────────────────────────────────
+WORKDIR /app
+
+# ── 5. Dépendances système ────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        whois \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 6. Dépendances Python (avant le code → optimisation du cache) ────────────
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# ── 7. Code source ────────────────────────────────────────────────────────────
+COPY app/ app/
+COPY src/ src/
+
+# ── 8. Modèle ML ─────────────────────────────────────────────────────────────
+COPY models/ models/
+
+# ── 9. Exposition du port ─────────────────────────────────────────────────────
+EXPOSE 8501
+
+# ── 10. Healthcheck ───────────────────────────────────────────────────────────
+# Streamlit expose un endpoint de santé natif : /_stcore/health
+# --start-period=30s : Streamlit prend un peu plus de temps à démarrer que FastAPI
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" \
+    || exit 1
+
+# ── 11. Commande de démarrage ────────────────────────────────────────────────
+# Options importantes pour fonctionner dans un conteneur :
+#   --server.address 0.0.0.0     : écouter sur toutes les interfaces (pas juste localhost)
+#   --server.headless true       : ne pas ouvrir automatiquement un navigateur
+#   --server.enableCORS false    : autoriser les requêtes cross-origin (depuis l'hôte ou d'autres services)
+#   --server.enableXsrfProtection false : désactiver XSRF pour les environnements Docker
+CMD ["sh", "-c", "streamlit run app/streamlit_ui.py \
+    --server.port ${STREAMLIT_PORT} \
+    --server.address 0.0.0.0 \
+    --server.headless true \
+    --server.enableCORS false \
+    --server.enableXsrfProtection false"]
