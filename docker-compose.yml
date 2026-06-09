@@ -1,0 +1,125 @@
+# ============================================================
+#  docker-compose.yml  —  Orchestrateur multi-services
+#  Projet : Phish-Detect ML  |  Phase 4 — Conteneurisation
+# ============================================================
+#
+#  Ce fichier lance les 2 services ensemble d'une seule commande :
+#      docker-compose up
+#
+#  Architecture :
+#      [Navigateur] → localhost:8501 → [Streamlit UI]
+#      [Navigateur] → localhost:8000 → [FastAPI]
+#      [Streamlit]  → http://api:8000 → [FastAPI]   (réseau interne Docker)
+# ============================================================
+
+version: "3.9"
+
+services:
+
+  # ══════════════════════════════════════════════════════════
+  #  SERVICE 1 : API FastAPI
+  #  URL d'accès : http://localhost:8000
+  #  Swagger UI  : http://localhost:8000/docs
+  # ══════════════════════════════════════════════════════════
+  api:
+    # build: indique comment construire l'image
+    #   context: .          → le répertoire racine du projet est le contexte de build
+    #   dockerfile: ...     → quel Dockerfile utiliser
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+
+    # Nom fixe du conteneur (utile pour les logs et les commandes docker)
+    container_name: phish-detect-api
+
+    # Mapping de ports : <port_sur_ta_machine>:<port_dans_le_conteneur>
+    # ${API_PORT:-8000} → utilise la variable API_PORT du .env, ou 8000 par défaut
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    # Variables d'environnement injectées dans le conteneur au démarrage
+    # Docker-compose lit automatiquement le fichier .env du répertoire courant
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - APP_PORT=8000
+      - MODEL_PATH=/app/models/final_model.joblib
+      # La clé API est lue depuis .env (jamais stockée dans l'image)
+      - URLSCAN_API_KEY=${URLSCAN_API_KEY:-}
+
+    # Volumes : montage du dossier models/ local dans le conteneur
+    # Syntaxe : <chemin_local>:<chemin_dans_conteneur>:<options>
+    # :ro = read-only → le conteneur ne peut que LIRE les modèles (sécurité)
+    # Avantage : changer le modèle ne nécessite pas de reconstruire l'image !
+    volumes:
+      - ./models:/app/models:ro
+
+    # Réseau interne : les deux services se voient via leurs noms de service
+    networks:
+      - phish-network
+
+    # Politique de redémarrage : redémarre automatiquement sauf arrêt manuel
+    restart: unless-stopped
+
+    # Healthcheck au niveau docker-compose (complète le HEALTHCHECK du Dockerfile)
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ══════════════════════════════════════════════════════════
+  #  SERVICE 2 : Interface Streamlit
+  #  URL d'accès : http://localhost:8501
+  # ══════════════════════════════════════════════════════════
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+
+    container_name: phish-detect-ui
+
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+
+    environment:
+      - STREAMLIT_PORT=8501
+      - MODEL_PATH=/app/models/final_model.joblib
+      - URLSCAN_API_KEY=${URLSCAN_API_KEY:-}
+      # URL interne pour que Streamlit appelle l'API :
+      # "api" est le nom du service Docker → résolu automatiquement sur le réseau interne
+      - API_URL=http://api:8000
+
+    volumes:
+      - ./models:/app/models:ro
+
+    networks:
+      - phish-network
+
+    # depends_on : Docker attend que l'API soit "healthy" avant de démarrer Streamlit
+    # Cela évite que l'UI démarre alors que l'API n'est pas encore prête
+    depends_on:
+      api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# ══════════════════════════════════════════════════════════════
+#  RÉSEAU INTERNE
+#  Les conteneurs se parlent par leurs noms de service :
+#    - "api"       → accessible depuis streamlit via http://api:8000
+#    - "streamlit" → accessible depuis api via http://streamlit:8501
+# ══════════════════════════════════════════════════════════════
+networks:
+  phish-network:
+    driver: bridge
+    name: phish-detect-network
