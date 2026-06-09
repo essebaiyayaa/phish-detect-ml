@@ -331,7 +331,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-MODEL_PATH = ROOT / "models" / "final_model.joblib"
+# Lire MODEL_PATH depuis la variable d'environnement (Docker) ou chemin local par défaut
+_model_path_env = os.environ.get("MODEL_PATH", None)
+MODEL_PATH = Path(_model_path_env) if _model_path_env else ROOT / "models" / "final_model.joblib"
 THRESHOLD  = 0.3
 use_enriched = True
 

@@ -1,0 +1,69 @@
+# ============================================================
+#  .dockerignore  —  Fichiers exclus des images Docker
+#  Projet : Phish-Detect ML  |  Phase 4 — Conteneurisation
+# ============================================================
+#
+#  Fonctionne comme .gitignore mais pour Docker.
+#  Sans ce fichier, Docker copierait TOUT le répertoire dans l'image
+#  → image énorme et informations sensibles exposées.
+#
+#  Règle : exclure tout ce qui n'est pas nécessaire à l'EXÉCUTION
+#  de l'application (données brutes, notebooks, cache, secrets...).
+# ============================================================
+
+# ── Données (lourdes et inutiles en production) ──────────────
+data/raw/
+data/processed/
+data/*.parquet
+data/*.json
+
+# ── Notebooks Jupyter (inutiles en production) ───────────────
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# ── Résultats et figures (non nécessaires au runtime) ────────
+figures/
+results/
+
+# ── Git (inutile et volumineux) ──────────────────────────────
+.git/
+.gitignore
+
+# ── Environnements Python locaux ─────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Cache Python (recréé automatiquement, inutile dans l'image)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyo
+.Python
+
+# ── Variables d'environnement (JAMAIS dans une image Docker !)
+# Elles sont injectées au runtime par docker-compose via le .env local
+.env
+.env.*
+!.env.example
+
+# ── Fichiers de configuration IDE et outils locaux ───────────
+.gemini/
+.vscode/
+.idea/
+*.DS_Store
+
+# ── Logs locaux ──────────────────────────────────────────────
+*.log
+collecte.log
+
+# ── Documentation (inutile dans le conteneur) ────────────────
+*.md
+!README.md
+
+# ── Fichiers de test locaux ──────────────────────────────────
+scratch/
+tests/
