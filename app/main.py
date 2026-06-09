@@ -1,4 +1,5 @@
 
+import os
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -22,7 +23,8 @@ app = FastAPI(
 )
 
 # Chemins des modèles
-MODEL_PATH = Path("models/final_model.joblib")
+# Lire depuis la variable d'environnement (Docker) ou utiliser le chemin local par défaut
+MODEL_PATH = Path(os.environ.get("MODEL_PATH", "models/final_model.joblib"))
 THRESHOLD = 0.3  # Seuillage optimal défini en Phase 1
 
 # Variables globales pour le modèle (chargé une seule fois au démarrage)
