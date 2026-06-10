@@ -1,137 +1,98 @@
-# PhishGuard : Détecteur de Phishing ML (Phish-Detect ML)
+# PhishGuard — Détecteur de phishing par Machine Learning
 
-Ce projet est une solution complète de Machine Learning permettant de détecter automatiquement les sites web de phishing à partir de l'analyse de leur URL. L'application intègre un modèle de Random Forest pré-entraîné, exposé via une API REST performante (FastAPI) et rendu accessible aux utilisateurs finaux grâce à une interface web interactive (Streamlit). L'ensemble du système permet des prédictions unitaires ou par lots avec un haut niveau de confiance, garantissant portabilité et reproductibilité via Docker.
-
----
-
-## Captures d'écran de l'interface (Flux Utilisateur)
-
-Voici le flux complet de l'application.
-
-### 1. Page "Analyser une URL" (Prédiction unitaire)
-![Saisie d'une URL](figures/ui_1_input.png)
-
-### 2. Résultat de l'analyse : Site Légitime
-![Résultat URL Légitime](figures/ui_2_legit.png)
-
-### 3. Résultat de l'analyse : Site de Phishing
-![Résultat URL Phishing](figures/ui_3_phishing.png)
-
-### 4. Page "Analyse par lot (CSV)" : Interface de chargement
-![Upload Batch CSV](figures/ui_4_batch_upload.png)
-
-### 5. Résultat de l'Analyse par lot
-![Résultats Batch](figures/ui_5_batch_results.png)
-![Résultats Batch](figures/ui_5_batch_results2.png)
-
-### 6. Page "À propos"
-![Page À propos](figures/ui_6_about.png)
-![Page À propos](figures/ui_7_about.png)
-![Page À propos](figures/ui_8_about.png)
-![Page À propos](figures/ui_9_about.png)
+**PhishGuard** est une application de détection automatique de sites de phishing à partir de l'analyse d'URL. Un modèle Random Forest pré-entraîné est exposé via une API REST (FastAPI) et accessible aux utilisateurs via une interface web interactive (Streamlit). Le projet permet des prédictions unitaires ou par lot, avec déploiement reproductible via Docker.
 
 ---
 
-## Installation et Démarrage
+## Captures d'écran de l'interface
 
-### Option 1 : Démarrage rapide avec Docker (Recommandé)
-Assurez-vous d'avoir [Docker Desktop](https://www.docker.com/) installé et démarré sur votre machine.
+### Saisie d'une URL à analyser
+
+![Page d'analyse unitaire](figures/ui_1_input.png)
+
+### Résultat : site de phishing détecté
+
+![Résultat phishing](figures/ui_3_phishing.png)
+
+### Analyse par lot (CSV)
+
+![Upload et résultats batch](figures/ui_4_batch_upload.png)
+
+---
+
+## Installation
+
+Le projet est fourni sous forme d'archive **`phishguard.zip`**. Décompressez-la, puis ouvrez un terminal à la racine du dossier `phishguard/` avant de suivre l'une des options ci-dessous.
+
+### Option 1 — Avec Docker (recommandé)
+
+Prérequis : [Docker Desktop](https://www.docker.com/) installé et démarré.
 
 ```bash
-# 1. Cloner le dépôt
-git clone https://github.com/essebaiyayaa/phish-detect-ml.git
-cd phish-detect-ml
+# 1. Décompresser l'archive phishguard.zip reçue
+# 2. Ouvrir un terminal dans le dossier extrait
+cd phishguard
 
-# 2. Copier le fichier d'environnement (optionnel — pour les clés API)
-cp .env.example .env
-
-# 3. Lancer l'application complète (API + UI en arrière-plan)
+# 3. Lancer l'application (API + interface web)
 docker compose up -d
 ```
 
 Une fois démarré :
-- Interface Streamlit : **http://localhost:8501**
-- API FastAPI : **http://localhost:8000**
-- Documentation Swagger : **http://localhost:8000/docs**
 
-### Option 2 : Installation manuelle (Sans Docker)
-Nécessite Python 3.11+.
+| Service | URL |
+|---|---|
+| Interface Streamlit | http://localhost:8501 |
+| API FastAPI | http://localhost:8000 |
+| Documentation Swagger | http://localhost:8000/docs |
+
+Pour arrêter les services : `docker compose down`
+
+### Option 2 — Sans Docker
+
+Prérequis : Python 3.11+.
 
 ```bash
-# 1. Cloner le dépôt
-git clone https://github.com/essebaiyayaa/phish-detect-ml.git
-cd phish-detect-ml
+# 1. Décompresser l'archive phishguard.zip reçue
+# 2. Ouvrir un terminal dans le dossier extrait
+cd phishguard
 
-# 2. Créer et activer un environnement virtuel
+# Créer et activer un environnement virtuel
 python -m venv venv
-# Windows :
+
+# Windows (PowerShell)
 venv\Scripts\activate
-# Linux/macOS :
+
+# macOS / Linux
 source venv/bin/activate
 
-# 3. Installer les dépendances figées
+# Installer les dépendances
 pip install -r requirements.txt
+```
 
-# 4. Lancer l'API FastAPI (Terminal 1)
+Lancer les deux services dans des terminaux séparés :
+
+```bash
+# Terminal 1 — API FastAPI
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 5. Lancer l'interface Streamlit (Terminal 2)
+# Terminal 2 — Interface Streamlit
 streamlit run app/streamlit_ui.py
 ```
 
 ---
 
-## Endpoints de l'API
-
-| Méthode | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Page d'accueil avec informations sur l'API et lien vers la documentation Swagger |
-| `GET` | `/health` | Vérifie que l'API et le modèle sont opérationnels — retourne `200 OK` |
-| `GET` | `/model/info` | Métadonnées du modèle : type, version, features, métriques de performance, seuil utilisé |
-| `POST` | `/predict` | Prédiction unitaire : reçoit les 15 features d'une URL, retourne classe + probabilité |
-| `POST` | `/predict/batch` | Prédiction par lot : reçoit un fichier CSV de features, retourne un CSV enrichi des prédictions |
-
-### Schéma de réponse de `/predict`
-
-```json
-{
-  "prediction": "phishing",
-  "probability": 0.92,
-  "threshold": 0.3,
-  "confidence": "high"
-}
-```
-
-| Champ | Type | Description |
-|---|---|---|
-| `prediction` | `string` | Verdict final : `"phishing"` ou `"legitime"` |
-| `probability` | `float` | Probabilité brute d'appartenir à la classe phishing (entre 0 et 1) |
-| `threshold` | `float` | Seuil de décision appliqué (0.3 — optimisé pour maximiser le Recall) |
-| `confidence` | `string` | Niveau de confiance : `"high"` (>90%), `"medium"` (70-90%), `"low"` (<70%) |
-
----
-
 ## Exemple d'utilisation
 
-> **ℹ️ Note importante selon votre système d'exploitation**
-> - **Windows PowerShell** : utilisez `Invoke-WebRequest` — la commande `curl` est un alias qui ne fonctionne pas avec JSON
-> - **macOS / Linux / Git Bash** : utilisez `curl` directement
+### Tester l'API avec curl
 
----
+Vérifier que l'API est opérationnelle :
 
-### 1. Vérifier que l'API est démarrée (`/health`)
-
-#### 🪟 Windows PowerShell
-```powershell
-Invoke-WebRequest -Uri "http://localhost:8000/health" | Select-Object -ExpandProperty Content
-```
-
-#### macOS / Linux
 ```bash
 curl http://localhost:8000/health
 ```
 
-**Réponse attendue :**
+Réponse attendue :
+
 ```json
 {
   "status": "healthy",
@@ -140,19 +101,8 @@ curl http://localhost:8000/health
 }
 ```
 
----
+Effectuer une prédiction unitaire :
 
-### 2. Prédiction unitaire (`/predict`)
-
-#### 🪟 Windows PowerShell
-```powershell
-Invoke-WebRequest -Method POST -Uri "http://localhost:8000/predict" `
-  -ContentType "application/json" `
-  -Body '{"url_length": 52, "domain_length": 28, "num_dots": 3, "num_subdomains": 2, "num_hyphens": 1, "num_underscores": 0, "num_at_signs": 0, "path_length": 15, "brand_similarity": 0.8, "domain_age_days": 5, "has_port": 0, "has_https": 0, "has_http_in_domain": 1, "has_valid_ssl": 0, "country": "UNKNOWN"}' `
-  | Select-Object -ExpandProperty Content
-```
-
-#### macOS / Linux
 ```bash
 curl -X POST "http://localhost:8000/predict" \
   -H "Content-Type: application/json" \
@@ -175,7 +125,8 @@ curl -X POST "http://localhost:8000/predict" \
   }'
 ```
 
-**Réponse JSON attendue :**
+Réponse attendue :
+
 ```json
 {
   "prediction": "phishing",
@@ -185,95 +136,71 @@ curl -X POST "http://localhost:8000/predict" \
 }
 ```
 
----
+> **Windows (PowerShell)** : `curl` est un alias de `Invoke-WebRequest`. Utilisez `curl.exe` pour les commandes ci-dessus, ou remplacez par `Invoke-WebRequest` avec `-Method POST` et `-Body`.
 
-### 3. Prédiction par lot (`/predict/batch`)
+Prédiction par lot (fichier CSV) :
 
-Fournissez un fichier CSV contenant les colonnes de features — utilisez `data/sample.csv` comme modèle de format.
-
-#### 🪟 Windows PowerShell
-```powershell
-curl.exe -X POST "http://localhost:8000/predict/batch" -F "file=@data/sample.csv"
-```
-
-#### macOS / Linux
 ```bash
 curl -X POST "http://localhost:8000/predict/batch" \
   -F "file=@data/sample.csv"
 ```
 
-Le retour est un fichier CSV enrichi avec les colonnes `prediction`, `probability` et `threshold`.
+### Flow utilisateur — Interface web
+
+1. Ouvrir **http://localhost:8501** dans un navigateur.
+2. Coller une URL suspecte (ex. `http://paypal-secure-login.verify-account.com/login`).
+3. Cliquer sur **Analyser** : le système extrait automatiquement les 15 caractéristiques de l'URL (structure, SSL, âge du domaine, similarité de marque).
+4. Consulter le verdict (**Phishing** ou **Légitime**), la probabilité et les facteurs de risque expliqués.
+
+![Flow utilisateur — saisie et résultat](figures/ui_2_legit.png)
 
 ---
-
-### 4. Informations sur le modèle (`/model/info`)
-
-#### 🪟 Windows PowerShell
-```powershell
-Invoke-WebRequest -Uri "http://localhost:8000/model/info" | Select-Object -ExpandProperty Content
-```
-
-#### macOS / Linux
-```bash
-curl http://localhost:8000/model/info
-```
-
----
-
-### 5. Flow Utilisateur — Interface Web Streamlit
-1. **Accès :** Ouvrir `http://localhost:8501` dans un navigateur.
-2. **Saisie :** Coller une URL suspecte (ex: `http://paypal-secure-login.verify-account.com/login`) dans la barre de recherche.
-3. **Analyse :** Le système extrait automatiquement les 15 caractéristiques de l'URL (structure syntaxique, certificat SSL, âge du domaine via WHOIS, similarité de marque).
-4. **Résultat :** L'interface affiche le verdict (**Phishing** ou **Légitime**), la jauge de probabilité animée, le niveau de confiance, et des explications textuelles des facteurs de risque détectés.
-
----
-
-
 
 ## Architecture du dépôt
 
 ```text
-phish-detect-ml/
-├── app/                        # Code source de l'application
-│   ├── main.py                 # API REST (FastAPI) — 5 endpoints, validation Pydantic, logging
-│   └── streamlit_ui.py         # Interface Utilisateur interactive (Streamlit, 3 pages)
-├── data/                       # Données (brutes, traitées, exemples)
-│   ├── dataset.parquet         # Dataset complet (11 000 lignes × 17 colonnes)
-│   ├── dataset_engineered.parquet  # Dataset après feature engineering (Phase 2)
-│   └── sample.csv              # Extrait de 100 lignes — format d'entrée pour /predict/batch
-├── figures/                    # Graphiques EDA et captures d'écran de l'UI
-├── models/                     # Modèles sérialisés (artefacts ML)
-│   ├── final_model.joblib      # Modèle Random Forest final (~4.4 MB)
-│   └── preprocessor.joblib     # Pipeline de prétraitement (RobustScaler + OHE)
-├── notebooks/                  # Notebooks Jupyter numérotés par phase
-│   ├── 01_discovery.ipynb      # Phase 1 — Exploration initiale et EDA
-│   ├── 02_eda.ipynb            # Phase 1 — Analyse exploratoire approfondie
-│   ├── 03_preprocessing.ipynb  # Phase 2 — Nettoyage, FE, pipeline
-│   ├── 04_modeling.ipynb       # Phase 3 — Entraînement SVM, MLP, RF, LightGBM
-│   ├── 05_tuning.ipynb         # Phase 3 — Hyperparameter tuning
-│   └── 06_evaluation.ipynb     # Phase 3 — Évaluation finale et sélection du modèle
-├── results/                    # Résultats numériques de la Phase 3
-│   ├── phase3_results_summary.csv      # Métriques CV-5 par modèle
-│   ├── rebalancing_comparison.csv      # Comparaison des stratégies de rééquilibrage
-│   ├── phase3_metrics_comparison.png   # Graphique comparatif des modèles
-│   └── phase3_f1_evolution.png         # Évolution du F1 par fold
-├── src/                        # Scripts métier et utilitaires
-│   └── data_collection.py      # Collecte PhishTank + Tranco, extracteur de features URL
-├── Dockerfile.api              # Image Docker pour l'API FastAPI (python:3.11-slim)
-├── Dockerfile.streamlit        # Image Docker pour l'UI Streamlit (python:3.11-slim)
-├── docker-compose.yml          # Orchestrateur — réseau interne, healthchecks, volumes
-├── requirements.txt            # Dépendances figées (reproductibilité garantie)
-├── .dockerignore               # Fichiers exclus des images Docker (data/, notebooks/, .git)
-├── .env.example                # Template des variables d'environnement (clés API)
-└── README.md                   # Ce fichier de documentation principale
+phishguard/
+├── app/                            # Application déployée
+│   ├── main.py                     # API REST FastAPI (endpoints /health, /predict, /predict/batch, /model/info)
+│   └── streamlit_ui.py             # Interface utilisateur Streamlit (analyse unitaire, batch, à propos)
+├── data/                           # Données du projet
+│   ├── raw/                        # Données brutes collectées (PhishTank, Tranco)
+│   │   ├── phishtank_raw.json
+│   │   └── legitimate_urls.csv
+│   ├── processed/                  # Jeux train / validation / test après prétraitement
+│   │   ├── train.csv
+│   │   ├── validation.csv
+│   │   └── test.csv
+│   ├── dataset.parquet             # Dataset complet (11 000 lignes)
+│   ├── dataset_engineered.parquet  # Dataset après feature engineering
+│   └── sample.csv                  # Exemple de 100 lignes pour /predict/batch
+├── figures/                        # Visualisations EDA et captures d'écran de l'UI
+│   ├── eda/                        # Graphiques d'analyse exploratoire
+│   └── ui_*.png                    # Captures du flux utilisateur Streamlit
+├── models/                         # Artefacts ML sérialisés
+│   ├── final_model.joblib          # Modèle Random Forest final
+│   └── preprocessor.joblib         # Pipeline de prétraitement (RobustScaler + OHE)
+├── notebooks/                      # Notebooks Jupyter par phase du projet
+│   ├── 01_discovery.ipynb          # Phase 1 — Exploration initiale
+│   ├── 02_eda.ipynb                # Phase 1 — Analyse exploratoire
+│   ├── 03_preprocessing.ipynb      # Phase 2 — Nettoyage et feature engineering
+│   ├── 04_modeling.ipynb           # Phase 3 — Entraînement des modèles
+│   ├── 05_tuning.ipynb             # Phase 3 — Optimisation des hyperparamètres
+│   └── 06_evaluation.ipynb         # Phase 3 — Évaluation finale
+├── src/
+│   └── data_collection.py          # Collecte des URLs et extraction des features
+├── Dockerfile.api                  # Image Docker de l'API
+├── Dockerfile.streamlit            # Image Docker de l'interface
+├── docker-compose.yml              # Orchestration des deux services
+├── requirements.txt                # Dépendances Python figées
+└── README.md                       # Le fichier de documentation principale
 ```
 
 ---
 
-## Documentation de l'API (Swagger)
+## Documentation Swagger
 
-FastAPI génère automatiquement une documentation interactive basée sur OpenAPI.
-Une fois l'API démarrée, testez les requêtes directement depuis votre navigateur :
+L'API expose une documentation interactive générée automatiquement par FastAPI (OpenAPI). Une fois l'API démarrée, vous pouvez tester tous les endpoints directement depuis le navigateur :
 
 **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
@@ -281,12 +208,12 @@ Une fois l'API démarrée, testez les requêtes directement depuis votre navigat
 
 ## Limites connues du modèle
 
-Bien que le modèle présente d'excellentes performances (F1 = 0.9962, Recall = 0.9960), quelques limites inhérentes à l'approche doivent être notées :
+Bien que le modèle atteigne d'excellentes performances (F1 ≈ 0.996, Recall ≈ 0.996), les limites suivantes doivent être prises en compte :
 
-1. **URLs raccourcies (Shorteners) :** Les services comme `bit.ly` ou `tinyurl.com` masquent les caractéristiques structurelles réelles de la destination finale. Le modèle analyse l'URL raccourcie — qui ressemble à une URL légitime courte — et non la page de destination réelle.
-2. **Domaines légitimes compromis (Piraterie) :** Un site web historiquement fiable piraté pour héberger une page malveillante conservera des attributs « sûrs » (âge de domaine ancien, SSL valide). Le modèle ne peut pas détecter ce cas sans analyse du contenu de la page.
-3. **Faux Positifs sur les jeunes entreprises :** De nouvelles entreprises légitimes avec des domaines récemment créés (< 30 jours) peuvent déclencher l'alerte par excès de prudence.
-4. **Dépendance réseau externe :** L'extraction des features enrichies (WHOIS, SSL) dépend de la disponibilité de services externes et requiert une connexion internet stable.
+1. **URLs raccourcies** — Les services comme `bit.ly` ou `tinyurl.com` masquent la destination réelle. Le modèle analyse l'URL raccourcie, qui ressemble souvent à une URL légitime courte.
+2. **Domaines légitimes compromis** — Un site historiquement fiable piraté conserve des attributs « sûrs » (âge de domaine ancien, SSL valide). Le modèle ne détecte pas ce cas sans analyse du contenu de la page.
+3. **Faux positifs sur jeunes domaines** — Les entreprises légitimes avec un domaine récent (< 30 jours) peuvent être classées à tort comme phishing par excès de prudence.
+4. **Dépendance réseau** — L'extraction des features enrichies (WHOIS, certificat SSL) nécessite une connexion internet et dépend de la disponibilité de services externes.
 
 ---
 
