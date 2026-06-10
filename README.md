@@ -228,26 +228,7 @@ curl http://localhost:8000/model/info
 
 ---
 
-## Variables d'environnement
 
-Copiez `.env.example` en `.env` et ajustez si nécessaire avant de lancer l'application :
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Valeur par défaut | Service | Description |
-|---|---|---|---|
-| `API_PORT` | `8000` | API | Port d'écoute externe de l'API FastAPI sur la machine hôte |
-| `STREAMLIT_PORT` | `8501` | UI | Port d'écoute externe de l'interface Streamlit sur la machine hôte |
-| `MODEL_PATH` | `/app/models/final_model.joblib` | API + UI | Chemin vers le modèle sérialisé à l'intérieur du conteneur |
-| `LOG_LEVEL` | `info` | API | Niveau de verbosité des logs uvicorn (`debug`, `info`, `warning`, `error`) |
-| `URLSCAN_API_KEY` | *(vide)* | API + UI | Clé API URLScan.io pour l'enrichissement réseau des features (optionnel) |
-| `PHISHTANK_API_KEY` | *(vide)* | Collecte | Clé API PhishTank pour la collecte des URLs de phishing (Phase 1 uniquement) |
-
-> **Note :** Les variables `API_PORT`, `STREAMLIT_PORT` et `LOG_LEVEL` sont lues par `docker-compose.yml` avec des valeurs de repli (`:-`). Si le fichier `.env` est absent, les valeurs par défaut s'appliquent automatiquement.
-
----
 
 ## Architecture du dépôt
 
